@@ -1115,8 +1115,14 @@
     } catch (e) { return 'icon16.png'; }
   }
 
-  // Inline onerror handler for chat favicon images — replaces with letter avatar
-  window.__0tabFavFallback = function (img) {
+  // Letter-avatar fallback for chat favicon images. We can't use inline
+  // onerror="" because MV3's default CSP blocks inline event handlers, so
+  // a single document-level error listener (capture phase, since `error`
+  // doesn't bubble) handles every favicon image — including those inserted
+  // later via innerHTML.
+  function __0tabApplyFavFallback(img) {
+    if (!img || img.dataset.zerotabFallback === '1') return;
+    img.dataset.zerotabFallback = '1';
     let name = img.getAttribute('data-name') || '?';
     let size = img.width || 16;
     let colors = typeof AVATAR_COLORS !== 'undefined' ? AVATAR_COLORS : ['#4A90D9','#E06C75','#98C379','#D19A66','#C678DD','#56B6C2','#E5C07B','#BE5046'];
@@ -1127,14 +1133,18 @@
     avatar.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:' + size + 'px;height:' + size + 'px;border-radius:50%;background:' + colors[colorIdx] + ';color:#fff;font-size:' + Math.round(size * 0.55) + 'px;font-weight:600;flex-shrink:0;line-height:1;vertical-align:middle;';
     avatar.className = img.className;
     if (img.parentNode) img.parentNode.replaceChild(avatar, img);
-  };
+  }
+  document.addEventListener('error', function (e) {
+    let t = e.target;
+    if (t && t.tagName === 'IMG' && t.hasAttribute('data-name')) __0tabApplyFavFallback(t);
+  }, true);
 
   function chatFavImg(url, name, cssClass, size) {
     let src = chatGetFavicon(url);
     let s = size || 16;
     let cls = cssClass ? ' class="' + cssClass + '"' : '';
     let safeName = chatEscapeHtml(name || '?');
-    return '<img src="' + src + '"' + cls + ' width="' + s + '" height="' + s + '" data-name="' + safeName + '" onerror="__0tabFavFallback(this)">';
+    return '<img src="' + src + '"' + cls + ' width="' + s + '" height="' + s + '" data-name="' + safeName + '">';
   }
 
   function chatTimeAgo(ts) {

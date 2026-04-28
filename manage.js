@@ -10,6 +10,17 @@ function isShortcutKey(key) {
   return !INTERNAL_KEYS.includes(key);
 }
 
+// MV3 CSP blocks inline onerror="" handlers, so favicon HTML carries a
+// data-hide-on-error attribute and we hide failed images with one
+// document-level capture-phase listener (the `error` event doesn't bubble).
+document.addEventListener('error', function (e) {
+  let t = e.target;
+  if (!t || t.tagName !== 'IMG') return;
+  let mode = t.getAttribute('data-hide-on-error');
+  if (mode === 'display') t.style.display = 'none';
+  else if (mode === 'visibility') t.style.visibility = 'hidden';
+}, true);
+
 // --- First-letter avatar fallback for missing favicons ---
 var AVATAR_COLORS = [
   '#4A90D9', '#E06C75', '#98C379', '#D19A66', '#C678DD',
@@ -1429,7 +1440,7 @@ async function loadStatsView() {
           row.className = 'insights-list-row';
           let ago = tab0TimeAgo(s.lastAccessed);
           row.innerHTML =
-            '<img class="insights-list-row-fav" src="' + insightsFavicon(s.url, 32) + '" onerror="this.style.visibility=\'hidden\'">' +
+            '<img class="insights-list-row-fav" src="' + insightsFavicon(s.url, 32) + '" data-hide-on-error="visibility">' +
             '<div class="insights-list-row-main">' +
               '<div class="insights-list-row-name">' + tab0EscapeHtml(s.name) + '</div>' +
               '<div class="insights-list-row-meta">' + ago + ' · ' + (s.count || 0) + ' opens</div>' +
@@ -1463,7 +1474,7 @@ async function loadStatsView() {
           row.className = 'insights-list-row';
           let ago = tab0TimeAgo(s.lastAccessed);
           row.innerHTML =
-            '<img class="insights-list-row-fav" src="' + insightsFavicon(s.url, 32) + '" onerror="this.style.visibility=\'hidden\'">' +
+            '<img class="insights-list-row-fav" src="' + insightsFavicon(s.url, 32) + '" data-hide-on-error="visibility">' +
             '<div class="insights-list-row-main">' +
               '<div class="insights-list-row-name">' + tab0EscapeHtml(s.name) + '</div>' +
               '<div class="insights-list-row-meta">last: ' + ago + ' · ' + (s.count || 0) + ' opens</div>' +
@@ -1498,7 +1509,7 @@ async function loadStatsView() {
           let row = document.createElement('div');
           row.className = 'insights-list-row';
           row.innerHTML =
-            '<img class="insights-list-row-fav" src="' + insightsFavicon(s.url, 32) + '" onerror="this.style.visibility=\'hidden\'">' +
+            '<img class="insights-list-row-fav" src="' + insightsFavicon(s.url, 32) + '" data-hide-on-error="visibility">' +
             '<div class="insights-list-row-main">' +
               '<div class="insights-list-row-name">' + tab0EscapeHtml(s.name) + '</div>' +
               '<div class="insights-list-row-meta">' + (s.url ? tab0EscapeHtml((new URL(s.url).hostname || '').replace(/^www\./, '')) : 'no url') + '</div>' +
@@ -3973,7 +3984,7 @@ async function homeRenderDock() {
       fav = '<span class="home-dock-tile-fav" style="display:flex;align-items:center;justify-content:center;color:var(--accent);"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>';
     } else {
       let src = homeFaviconUrl(r.data.url, 64);
-      fav = '<img class="home-dock-tile-fav" src="' + src + '" onerror="this.style.visibility=\'hidden\'">';
+      fav = '<img class="home-dock-tile-fav" src="' + src + '" data-hide-on-error="visibility">';
     }
     let meta = isFolder
       ? ((r.data.urls ? r.data.urls.length : 0) + ' tabs')
@@ -4137,7 +4148,7 @@ async function homeRenderRecent() {
     let ago = tab0TimeAgo(r.lastAccessed);
     let fav = homeFaviconUrl(r.url, 32);
     el.innerHTML =
-      '<img class="home-recent-row-fav" src="' + fav + '" onerror="this.style.visibility=\'hidden\'">' +
+      '<img class="home-recent-row-fav" src="' + fav + '" data-hide-on-error="visibility">' +
       '<div class="home-recent-row-main">' +
         '<div class="home-recent-row-name">' + tab0EscapeHtml(r.name) + '</div>' +
         '<div class="home-recent-row-meta">' + ago + ' · ' + (r.count || 0) + ' opens</div>' +
@@ -4486,7 +4497,7 @@ async function openHistoryImportModal(options) {
     try { fav = 'https://www.google.com/s2/favicons?domain=' + new URL(c.url).hostname + '&sz=32'; } catch (e) {}
     row.innerHTML =
       '<input type="checkbox" checked>' +
-      (fav ? '<img class="history-import-row-fav" src="' + fav + '" onerror="this.style.visibility=\'hidden\'">' : '<span class="history-import-row-fav"></span>') +
+      (fav ? '<img class="history-import-row-fav" src="' + fav + '" data-hide-on-error="visibility">' : '<span class="history-import-row-fav"></span>') +
       '<div class="history-import-row-main">' +
         '<span class="history-import-row-title">' + tab0EscapeHtml(c.title) + '</span>' +
         '<span class="history-import-row-url">' + tab0EscapeHtml(c.url) + '</span>' +
@@ -4811,7 +4822,7 @@ async function refreshTopUtilityStats() {
         if (url) {
           try {
             let host = new URL(url).hostname;
-            iconHtml = '<img src="https://www.google.com/s2/favicons?domain=' + host + '&sz=16" onerror="this.style.display=\'none\'">';
+            iconHtml = '<img src="https://www.google.com/s2/favicons?domain=' + host + '&sz=16" data-hide-on-error="display">';
           } catch (e) {}
         }
       }
