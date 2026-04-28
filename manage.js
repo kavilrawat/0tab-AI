@@ -4471,6 +4471,23 @@ async function openHistoryImportModal(options) {
   subtitle.textContent = 'Finding sites you visit often…';
   if (countEl) countEl.textContent = '';
 
+  // Wire up dismiss controls FIRST so they work even if candidate gathering
+  // returns empty or throws (otherwise the early-return path below leaves
+  // the user with a modal whose Skip/Close/backdrop are dead).
+  function close() {
+    overlay.classList.add('hidden');
+  }
+  if (closeBtn) closeBtn.onclick = close;
+  if (skipBtn) skipBtn.onclick = async function () {
+    if (dontShowCheckbox && dontShowCheckbox.checked) {
+      try { await storageSet({ [HISTORY_IMPORT_FLAG]: true, [HISTORY_IMPORT_DISMISSED_FLAG]: true }); } catch (e) {}
+    }
+    close();
+  };
+  overlay.onclick = function (e) {
+    if (e.target === overlay) close();
+  };
+
   let candidates;
   try {
     candidates = await tab0GatherHistoryCandidates(20);
@@ -4526,17 +4543,6 @@ async function openHistoryImportModal(options) {
   selectNoneBtn.onclick = function () {
     listEl.querySelectorAll('input[type="checkbox"]').forEach(function (cb) { cb.checked = false; });
     updateCount();
-  };
-
-  function close() {
-    overlay.classList.add('hidden');
-  }
-  closeBtn.onclick = close;
-  skipBtn.onclick = async function () {
-    if (dontShowCheckbox.checked) {
-      try { await storageSet({ [HISTORY_IMPORT_FLAG]: true, [HISTORY_IMPORT_DISMISSED_FLAG]: true }); } catch (e) {}
-    }
-    close();
   };
 
   confirmBtn.disabled = false;
@@ -4615,15 +4621,15 @@ async function openHistoryImportModal(options) {
     if (typeof loadBookmarksView === 'function') loadBookmarksView(true);
     if (typeof refreshTopUtilityStats === 'function') refreshTopUtilityStats();
   };
-
-  // Dismiss on backdrop click (but not on modal content)
-  overlay.onclick = function (e) {
-    if (e.target === overlay) close();
-  };
 }
 
 // Expose so Settings/other entry points can re-open it
 window.openHistoryImportModal = openHistoryImportModal;
+
+// Minimum fresh history candidates required to auto-show the importer.
+// Below this threshold we don't pop the modal — users can still launch it
+// manually from Settings via "Find frequent sites".
+const HISTORY_IMPORT_MIN_SUGGESTIONS = 10;
 
 // First-run / idle-trigger: if we haven't shown the importer yet and the
 // user has at most a handful of shortcuts, surface it. Runs once per page load.
@@ -4640,6 +4646,11 @@ async function maybeTriggerHistoryImport() {
       try { await storageSet({ [HISTORY_IMPORT_FLAG]: true }); } catch (e) {}
       return;
     }
+    // Pre-flight the candidate gathering so we only auto-show the modal
+    // when there are enough fresh suggestions to be worth interrupting for.
+    let preview;
+    try { preview = await tab0GatherHistoryCandidates(20); } catch (e) { preview = []; }
+    if (!preview || preview.length < HISTORY_IMPORT_MIN_SUGGESTIONS) return;
     // Slight delay so dashboard paint finishes first
     setTimeout(function () { openHistoryImportModal(); }, 800);
   } catch (e) { /* silent */ }
