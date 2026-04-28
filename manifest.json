@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "0tab AI",
   "version": "6.0",
-  "description": "AI bookmark shortcuts from your search bar. Organize, drag & drop, chat — powered by Gemini Nano.",
+  "description": "Open any bookmark in 3 keystrokes: 0 Tab name. On-device AI tags & chat, drag-to-move, folders that open as tab groups.",
   "permissions": ["contextMenus", "storage", "tabs", "activeTab", "notifications", "bookmarks", "webNavigation", "tabGroups", "favicon", "offscreen", "history"],
   "action": {
     "default_popup": "popup.html"
