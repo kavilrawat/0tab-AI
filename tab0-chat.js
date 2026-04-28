@@ -4403,22 +4403,6 @@
       addMessage('bot', 'What would you like to do?', options.slice(0, 4));
     }
 
-    // "What I can do" expandable
-    let capMsg = document.createElement('div');
-    capMsg.className = 'chat-msg chat-msg-bot';
-    let capContent = document.createElement('div');
-    capContent.className = 'chat-msg-content';
-    capContent.innerHTML = '<details class="chat-capabilities"><summary style="cursor:pointer;font-size:12px;color:var(--accent);font-weight:500;">What I can do</summary>' +
-      '<div style="font-size:12px;margin-top:8px;line-height:1.7;color:var(--text-secondary);">' +
-      '<strong style="color:var(--text-primary);">Find & Open</strong> — "open gmail", "find work links"<br>' +
-      '<strong style="color:var(--text-primary);">Save & Organize</strong> — "save a bookmark", "organize bookmarks"<br>' +
-      '<strong style="color:var(--text-primary);">Clean Up</strong> — "clean up unused", "find duplicates"<br>' +
-      '<strong style="color:var(--text-primary);">Analyze</strong> — "how many bookmarks?", "most used"<br>' +
-      '<strong style="color:var(--text-primary);">Manage</strong> — "rename shortcut", "bulk tag", "export"' +
-      '</div></details>';
-    capMsg.appendChild(capContent);
-    container.appendChild(capMsg);
-
     proactiveShown = true;
   }
 
