@@ -386,6 +386,32 @@ function storageRemove(keys) {
   });
 }
 
+// One-shot catch-up sweep so every existing Chrome bookmark — not just
+// those created after this build was installed — picks up a 0tab
+// shortcut. Gated by a session flag so we run it once per browser
+// session, not every time the service worker wakes.
+const _SESSION_RECONCILE_KEY = '__0tab_session_reconciled';
+async function _maybeReconcileExistingBookmarks() {
+  try {
+    if (!chrome.storage.session) return;
+    let flag = await new Promise(function (resolve) {
+      chrome.storage.session.get(_SESSION_RECONCILE_KEY, function (r) { resolve(r && r[_SESSION_RECONCILE_KEY]); });
+    });
+    if (flag) return;
+    // Mark BEFORE running so two near-simultaneous wakes don't double-run.
+    await new Promise(function (resolve) {
+      chrome.storage.session.set({ [_SESSION_RECONCILE_KEY]: true }, function () { resolve(); });
+    });
+    let res = await storageGet(['__0tab_settings']);
+    let s = res['__0tab_settings'] || {};
+    if (s.bookmarkSync === false) return;
+    await saveAllBookmarksAsShortcuts();
+  } catch (e) { /* silent */ }
+}
+// Defer slightly so the migration helpers and folder rename complete first.
+setTimeout(_maybeReconcileExistingBookmarks, 1500);
+
+
 // ============================================================
 // SYNC LOCK - Prevents infinite loops between bookmark and
 // storage listeners triggering each other
@@ -1289,31 +1315,55 @@ async function isInsideTab0Folder(bookmarkId) {
   }
 }
 
-// When a bookmark is created inside 0tab folder
+// Debounced "every bookmark should have a 0tab shortcut" reconcile.
+// Coalesces bursts (CSV imports, Chrome Sync) into a single sweep.
+let _reconcileShortcutsTimer = null;
+function _scheduleReconcileShortcuts() {
+  if (_reconcileShortcutsTimer) clearTimeout(_reconcileShortcutsTimer);
+  _reconcileShortcutsTimer = setTimeout(async function () {
+    _reconcileShortcutsTimer = null;
+    try {
+      let res = await storageGet(['__0tab_settings']);
+      let s = res['__0tab_settings'] || {};
+      if (s.bookmarkSync === false) return; // user opted out of auto-shortcutting
+      await saveAllBookmarksAsShortcuts();
+      notifyDashboard('bookmarkChanged');
+    } catch (e) {}
+  }, 500);
+}
+
+// When a bookmark is created anywhere in the tree, ensure it has a 0tab
+// shortcut. Bookmarks inside the 0tab folder still take the existing
+// fast path (which preserves the parent-folder name on the shortcut);
+// everything else triggers the debounced reconcile so it picks up a
+// shortcut on the next tick.
 chrome.bookmarks.onCreated.addListener((id, bookmark) => {
   if (!bookmark.url) return; // Ignore folder creation
 
   withSyncLock(async () => {
-    if (!(await isInsideTab0Folder(id))) return;
-
-    // Determine the folder name from the parent
-    let tab0Folder = await getOrCreateBookmarkFolder();
-    if (!tab0Folder || !tab0Folder.id) return;
-    let parentNode = await new Promise(resolve => {
-      chrome.bookmarks.get(bookmark.parentId, (results) => {
-        if (chrome.runtime.lastError) { resolve(null); return; }
-        resolve(results ? results[0] : null);
+    if (await isInsideTab0Folder(id)) {
+      // Determine the folder name from the parent
+      let tab0Folder = await getOrCreateBookmarkFolder();
+      if (!tab0Folder || !tab0Folder.id) return;
+      let parentNode = await new Promise(resolve => {
+        chrome.bookmarks.get(bookmark.parentId, (results) => {
+          if (chrome.runtime.lastError) { resolve(null); return; }
+          resolve(results ? results[0] : null);
+        });
       });
-    });
-    let folderName = (parentNode && parentNode.id !== tab0Folder.id) ? parentNode.title : '';
+      let folderName = (parentNode && parentNode.id !== tab0Folder.id) ? parentNode.title : '';
 
-    let name = bookmark.title.replace(/^\//, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 3);
-    if (!name) return;
+      let name = bookmark.title.replace(/^\//, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 3);
+      if (!name) return;
 
-    await storageSet({ [name]: { url: bookmark.url, count: 0, folder: folderName, bookmarkId: bookmark.id, bookmarkTitle: bookmark.title, tags: [], createdAt: Date.now() } });
+      await storageSet({ [name]: { url: bookmark.url, count: 0, folder: folderName, bookmarkId: bookmark.id, bookmarkTitle: bookmark.title, tags: [], createdAt: Date.now() } });
 
-    // Notify open dashboard tabs
-    notifyDashboard('bookmarkChanged');
+      notifyDashboard('bookmarkChanged');
+    } else {
+      // Outside the 0tab folder — reconcile so this (and any sibling
+      // bookmarks created in the same burst) gets a shortcut.
+      _scheduleReconcileShortcuts();
+    }
   });
 });
 
