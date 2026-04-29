@@ -4009,15 +4009,8 @@ async function homeRenderDock() {
       '<div class="home-dock-tile-meta">' + meta + '</div>';
     tile.addEventListener('click', function (ev) {
       if (isFolder) {
-        // Open all URLs in the underlying folder
-        if (r.data.folderId) {
-          chrome.runtime.sendMessage({
-            action: 'openFolderInTabGroup',
-            urls: Array.isArray(r.data.urls) ? r.data.urls : [],
-            groupName: r.data.folderTitle || r.key,
-            useTabGroup: true
-          });
-        }
+        // Navigate to Library and open the folder's bookmark panel.
+        navigateToLibraryAndOpenFolder(r.data.folderId, r.data.folderTitle || r.key);
         return;
       }
       if (r.data.url) {
@@ -4029,6 +4022,55 @@ async function homeRenderDock() {
     });
     grid.appendChild(tile);
   });
+}
+
+// Switch to the Library view and open the bookmark folder identified by
+// `folderId` in a side panel. Falls back to a plain Library navigation if
+// the folder can't be located (e.g. orphaned folder shortcut whose backing
+// Chrome bookmark folder no longer exists).
+async function navigateToLibraryAndOpenFolder(folderId, fallbackTitle) {
+  // 1. Activate the Library nav and view (mirrors the .nav-item click handler).
+  document.querySelectorAll('.nav-item').forEach(function (b) { b.classList.remove('active'); });
+  let libBtn = document.querySelector('[data-view="bookmarks"]');
+  if (libBtn) libBtn.classList.add('active');
+  document.querySelectorAll('.view').forEach(function (v) { v.classList.remove('active'); });
+  let bmView = document.getElementById('view-bookmarks');
+  if (bmView) bmView.classList.add('active');
+  // Make sure the Folders subtab is active so the panel renders inside it.
+  document.querySelectorAll('.tab-btn').forEach(function (b) { b.classList.remove('active'); });
+  let foldersTab = document.querySelector('.tab-btn[data-subtab="bm-folders"]');
+  if (foldersTab) foldersTab.classList.add('active');
+  document.querySelectorAll('.subtab').forEach(function (s) { s.classList.remove('active'); });
+  let foldersSub = document.getElementById('subtab-bm-folders');
+  if (foldersSub) foldersSub.classList.add('active');
+
+  // 2. Load the bookmark gallery (caches the tree in window._tab0CachedTree).
+  try { await loadBookmarksView(); } catch (e) { return; }
+  if (typeof loadShortcutsTable === 'function') loadShortcutsTable();
+
+  // 3. Walk the cached tree to find the folder node by id.
+  if (!folderId) {
+    if (fallbackTitle) showToast('Showing Library — folder "' + fallbackTitle + '" no longer exists.', 'info');
+    return;
+  }
+  let tree = window._tab0CachedTree;
+  if (!tree) return;
+  function findNode(node, id) {
+    if (!node) return null;
+    if (node.id === id) return node;
+    if (node.children) {
+      for (let c of node.children) { let f = findNode(c, id); if (f) return f; }
+    }
+    return null;
+  }
+  let node = null;
+  let roots = Array.isArray(tree) ? tree : [tree];
+  for (let r of roots) { node = findNode(r, folderId); if (node) break; }
+  if (node && typeof openFolderDetail === 'function') {
+    openFolderDetail(node);
+  } else if (fallbackTitle) {
+    showToast('Folder "' + fallbackTitle + '" no longer exists.', 'info');
+  }
 }
 
 async function homeRenderSuggestions() {
