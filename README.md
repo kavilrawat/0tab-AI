@@ -16,7 +16,7 @@ Your keyboard-first bookmark command center for Chrome.
 
 ### Install the published extension
 
-Use the Chrome Web Store listing when available, or install the source locally with the steps below.
+Install [0tab AI from the Chrome Web Store](https://chromewebstore.google.com/detail/tab0/ejcaloplfaackbkpdiidjgakbogilcdf?authuser=0&hl=en), or install the source locally with the steps below.
 
 ### Install from source
 
@@ -24,6 +24,8 @@ Use the Chrome Web Store listing when available, or install the source locally w
 2. Open `chrome://extensions` in Chrome.
 3. Enable **Developer mode**.
 4. Click **Load unpacked** and select this repository folder.
+
+For a guided walkthrough, read [Getting Started](docs/GETTING_STARTED.md).
 
 ## How to use it
 
@@ -41,6 +43,12 @@ The extension requests Chrome permissions for bookmarks, tabs, tab groups, histo
 ## Development
 
 This repository contains the unpacked Manifest V3 extension. Load it through `chrome://extensions`, then use **Reload** after changing source files. The extension includes its own browser-side assets and does not require a build step for the packaged source.
+
+## Product visuals
+
+![0tab AI product hero](docs/product-hunt-hero.png)
+
+The repository includes a launch hero in `docs/product-hunt-hero.png`. Product Hunt gallery images should also include real screenshots or a short product demo so users can see the extension running.
 
 ## Contributing
 
