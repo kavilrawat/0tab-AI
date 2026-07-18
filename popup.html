@@ -1,8 +1,12 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Preload the two most-used weights so text doesn't swap after first paint -->
+  <link rel="preload" as="font" href="fonts/inter-400.woff2" type="font/woff2" crossorigin>
+  <link rel="preload" as="font" href="fonts/inter-600.woff2" type="font/woff2" crossorigin>
+  <link rel="stylesheet" type="text/css" href="common.css">
   <link rel="stylesheet" type="text/css" href="style.css">
 </head>
 <body>
@@ -14,7 +18,7 @@
         <img src="icon48.png" alt="Logo" class="header-logo">
         <span class="header-title">0tab AI</span>
       </div>
-      <button id="manageBtn" class="header-dashboard-btn" title="Open Dashboard">
+      <button id="manageBtn" class="header-dashboard-btn" title="Open Dashboard" aria-label="Open Dashboard">
         Dashboard
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>
       </button>
@@ -50,8 +54,11 @@
         <div class="input-field has-prefix">
           <span class="input-prefix">0+[tab]</span>
           <input type="text" id="shortcutName" placeholder="e.g. desk">
+          <button id="deleteSavedBtn" class="delete-saved-btn hidden" title="Delete this shortcut" aria-label="Delete this shortcut">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+          </button>
         </div>
-        <a href="https://chromewebstore.google.com/detail/tab0/ejcaloplfaackbkpdiidjgakbogilcdf?authuser=0&hl=en" target="_blank" class="icon-btn help-btn" title="0tab AI on Chrome Web Store">
+        <a href="https://chromewebstore.google.com/detail/tab0/ejcaloplfaackbkpdiidjgakbogilcdf?authuser=0&hl=en" target="_blank" class="icon-btn help-btn" title="0tab AI on Chrome Web Store" aria-label="0tab AI on the Chrome Web Store">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         </a>
       </div>
@@ -83,10 +90,10 @@
         <input type="text" id="searchShortcuts" placeholder="Search your shortcuts...">
       </div>
       <!-- View toggle: grid (default) / list -->
-      <button id="viewToggle" class="icon-btn view-toggle-btn" title="Switch to list view">
+      <button id="viewToggle" class="icon-btn view-toggle-btn" title="Switch to list view" aria-label="Switch between grid and list view">
         <svg id="viewToggleIcon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
       </button>
-      <button id="shareButton" class="chip-btn" title="Share extension">
+      <button id="shareButton" class="chip-btn" title="Send feedback" aria-label="Send feedback">
         Feedback
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
       </button>
@@ -96,7 +103,7 @@
     <ul id="shortcutList" class="shortcuts-grid"></ul>
 
     <!-- Ask 0tab AI button (opens dashboard chat) -->
-    <button id="popupChatToggle" class="popup-chat-toggle" title="Ask 0tab AI">
+    <button id="popupChatToggle" class="popup-chat-toggle" title="Ask 0tab AI" aria-label="Ask 0tab AI">
       <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
     </button>
 
@@ -105,7 +112,7 @@
   <!-- Modal -->
   <div id="modalOverlay" class="modal-overlay hidden">
     <div class="modal-box">
-      <div id="modalTitle" class="modal-title"></div>
+      <h2 id="modalTitle" class="modal-title"></h2>
       <div id="modalBody" class="modal-body"></div>
       <div id="modalInputs" class="modal-inputs"></div>
       <div id="modalActions" class="modal-actions"></div>
@@ -113,8 +120,9 @@
   </div>
 
   <!-- Toast -->
-  <div id="toast" class="toast hidden"></div>
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
 
+  <script src="shared.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

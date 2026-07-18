@@ -3,12 +3,6 @@
 // Home, Bookmarks+Shortcuts, Statistics, Settings
 // ============================================================
 
-const INTERNAL_KEYS = ['__0tab_folders', '__0tab_settings', '__0tab_migrated_v1', '__0tab_migrated_v2', '__0tab_daily_stats', '__0tab_trash'];
-function isShortcutKey(key) {
-  if (!key || typeof key !== 'string') return false;
-  if (key.startsWith('__')) return false;
-  return !INTERNAL_KEYS.includes(key);
-}
 
 // MV3 CSP blocks inline onerror="" handlers, so favicon HTML carries a
 // data-hide-on-error attribute and we hide failed images with one
@@ -21,22 +15,6 @@ document.addEventListener('error', function (e) {
   else if (mode === 'visibility') t.style.visibility = 'hidden';
 }, true);
 
-// --- First-letter avatar fallback for missing favicons ---
-var AVATAR_COLORS = [
-  '#4A90D9', '#E06C75', '#98C379', '#D19A66', '#C678DD',
-  '#56B6C2', '#E5C07B', '#BE5046', '#61AFEF', '#EF596F',
-  '#89CA78', '#D4BC7D', '#2BBAC5', '#D55FDE', '#E8696A', '#7BC276'
-];
-
-function createLetterAvatar(name, size) {
-  size = size || 18;
-  let letter = (name || '?').charAt(0).toUpperCase();
-  let colorIndex = letter.charCodeAt(0) % AVATAR_COLORS.length;
-  let el = document.createElement('span');
-  el.textContent = letter;
-  el.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:' + size + 'px;height:' + size + 'px;border-radius:50%;background:' + AVATAR_COLORS[colorIndex] + ';color:#fff;font-size:' + Math.round(size * 0.55) + 'px;font-weight:600;flex-shrink:0;line-height:1;';
-  return el;
-}
 
 function applyFaviconFallback(img, name, size) {
   img.onerror = function () {
@@ -46,281 +24,6 @@ function applyFaviconFallback(img, name, size) {
   };
 }
 
-// Get Chrome's internal favicon URL (same-origin, cached, no network needed)
-function getChromeFaviconUrl(pageUrl, size) {
-  size = size || 32;
-  try {
-    return chrome.runtime.getURL('_favicon/?pageUrl=' + encodeURIComponent(pageUrl) + '&size=' + size);
-  } catch (e) {
-    return '';
-  }
-}
-
-// Check if an image is a real favicon vs Chrome's default placeholder.
-// Works because _favicon URLs are same-origin so canvas is not tainted.
-// Detects both colorful AND monochrome (black/white/gray) real favicons.
-function isRealFavicon(img) {
-  try {
-    let c = document.createElement('canvas');
-    let s = img.naturalWidth || 16;
-    c.width = s;
-    c.height = s;
-    let ctx = c.getContext('2d');
-    ctx.drawImage(img, 0, 0, s, s);
-    let data = ctx.getImageData(0, 0, s, s).data;
-    let opaquePixels = 0;
-    let hasColor = false;
-    let brightnessSet = new Set();
-    for (let i = 0; i < data.length; i += 4) {
-      let r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
-      if (a > 128) {
-        opaquePixels++;
-        // Check for chromatic color (not gray)
-        if (!hasColor && (Math.abs(r - g) > 15 || Math.abs(g - b) > 15 || Math.abs(r - b) > 15)) {
-          hasColor = true;
-        }
-        // Track quantized brightness for monochrome diversity check
-        brightnessSet.add(Math.floor((r * 0.299 + g * 0.587 + b * 0.114) / 16));
-      }
-    }
-    let totalPixels = (s * s);
-    // Mostly transparent → not a real favicon
-    if (opaquePixels < totalPixels * 0.05) return false;
-    // Has chromatic color → real favicon
-    if (hasColor) return true;
-    // Monochrome but with many distinct shades → real favicon (logos, text, etc)
-    // Chrome's default placeholder has very few shade levels (< 4)
-    return brightnessSet.size > 4;
-  } catch (e) {
-    return true;
-  }
-}
-
-// Creates a favicon element with smart fallback:
-// 1. Shows Google favicon immediately (fast, works for most sites)
-// 2. Chrome's _favicon API checks in background:
-//    - If Chrome has a REAL favicon → swap to Chrome's (proves it's real, better quality)
-//    - If Chrome has NO real favicon → replace with letter avatar
-//    - If _favicon fails → keep Google image as safe fallback
-function createFaviconEl(url, name, cssClass, size) {
-  size = size || 18;
-  let wrapper = document.createElement('span');
-  wrapper.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:' + size + 'px;height:' + size + 'px;flex-shrink:0;';
-  if (cssClass) wrapper.className = cssClass;
-
-  if (!url) {
-    wrapper.appendChild(createLetterAvatar(name, size));
-    return wrapper;
-  }
-
-  // Step 1: Show Google favicon immediately as placeholder
-  let googleUrl;
-  try { googleUrl = 'https://www.google.com/s2/favicons?domain=' + new URL(url).hostname + '&sz=' + (size > 16 ? 32 : 16); }
-  catch (e) { wrapper.appendChild(createLetterAvatar(name, size)); return wrapper; }
-
-  let img = document.createElement('img');
-  img.src = googleUrl;
-  img.width = size;
-  img.height = size;
-  img.alt = '';
-  img.style.cssText = 'border-radius:4px;display:block;';
-  img.onerror = function () {
-    wrapper.innerHTML = '';
-    wrapper.appendChild(createLetterAvatar(name, size));
-  };
-  wrapper.appendChild(img);
-
-  // Step 2: Chrome's _favicon API as the authority (same-origin → canvas-readable)
-  let chromeFavUrl = getChromeFaviconUrl(url, size > 16 ? 32 : 16);
-  if (chromeFavUrl) {
-    let checkImg = new Image();
-    checkImg.onload = function () {
-      if (isRealFavicon(checkImg)) {
-        // Chrome has a REAL favicon → use it directly (replaces Google globe/default)
-        checkImg.width = size;
-        checkImg.height = size;
-        checkImg.style.cssText = 'border-radius:4px;display:block;';
-        wrapper.innerHTML = '';
-        wrapper.appendChild(checkImg);
-      } else {
-        // Chrome confirms no real favicon → show letter avatar
-        wrapper.innerHTML = '';
-        wrapper.appendChild(createLetterAvatar(name, size));
-      }
-    };
-    checkImg.onerror = function () {
-      // _favicon failed → keep Google image as fallback
-    };
-    checkImg.src = chromeFavUrl;
-  }
-  return wrapper;
-}
-
-// --- Storage helpers ---
-// Storage moved from chrome.storage.sync to chrome.storage.local to avoid
-// the sync quotas that were silently dropping saves. Existing sync data
-// is migrated once via __0tabEnsureMigrated below.
-let __0tabMigrationPromise = null;
-function __0tabEnsureMigrated() {
-  if (__0tabMigrationPromise) return __0tabMigrationPromise;
-  __0tabMigrationPromise = new Promise(function (resolve) {
-    try {
-      chrome.storage.local.get('__0tab_migrated_v1', function (flagRes) {
-        if (chrome.runtime.lastError || (flagRes && flagRes.__0tab_migrated_v1)) {
-          resolve(); return;
-        }
-        chrome.storage.sync.get(null, function (syncData) {
-          if (chrome.runtime.lastError || !syncData || Object.keys(syncData).length === 0) {
-            chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-            return;
-          }
-          chrome.storage.local.get(null, function (localData) {
-            let toCopy = {};
-            Object.keys(syncData).forEach(function (k) {
-              if (!(k in localData)) toCopy[k] = syncData[k];
-            });
-            if (Object.keys(toCopy).length === 0) {
-              chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-              return;
-            }
-            chrome.storage.local.set(toCopy, function () {
-              chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-            });
-          });
-        });
-      });
-    } catch (e) { resolve(); }
-  });
-  return __0tabMigrationPromise;
-}
-__0tabEnsureMigrated();
-
-// v2 migration: rebrand from Tab0 AI → 0tab AI. Renames legacy `__ssg_*` /
-// `__tab0_*` storage keys to `__0tab_*`. Idempotent, gated on flag.
-const __0TAB_KEY_RENAME_MAP = {
-  '__ssg_folders': '__0tab_folders',
-  '__ssg_settings': '__0tab_settings',
-  '__ssg_trash': '__0tab_trash',
-  '__tab0_migrated_v1': '__0tab_migrated_v1',
-  '__tab0_daily_stats': '__0tab_daily_stats',
-  '__tab0_history_imported_v1': '__0tab_history_imported_v1',
-  '__tab0_history_dismissed_v1': '__0tab_history_dismissed_v1'
-};
-let __0tabMigrationV2Promise = null;
-function __0tabEnsureMigratedV2() {
-  if (__0tabMigrationV2Promise) return __0tabMigrationV2Promise;
-  __0tabMigrationV2Promise = __0tabEnsureMigrated().then(function () {
-    return new Promise(function (resolve) {
-      try {
-        chrome.storage.local.get('__0tab_migrated_v2', function (flagRes) {
-          if (chrome.runtime.lastError || (flagRes && flagRes.__0tab_migrated_v2)) {
-            resolve(); return;
-          }
-          chrome.storage.local.get(null, function (all) {
-            if (chrome.runtime.lastError) { resolve(); return; }
-            all = all || {};
-            let writes = {};
-            let removes = [];
-            Object.keys(__0TAB_KEY_RENAME_MAP).forEach(function (oldK) {
-              let newK = __0TAB_KEY_RENAME_MAP[oldK];
-              if (oldK in all) {
-                if (!(newK in all)) writes[newK] = all[oldK];
-                removes.push(oldK);
-              }
-            });
-            // Order: writes → removes → flag. Set migrated_v2 ONLY after
-            // both succeeded without lastError; if either fails we resolve
-            // without flagging so the next load retries.
-            function finish() {
-              chrome.storage.local.set({ '__0tab_migrated_v2': true }, function () { resolve(); });
-            }
-            function doRemove() {
-              if (removes.length === 0) { finish(); return; }
-              chrome.storage.local.remove(removes, function () {
-                if (chrome.runtime.lastError) { resolve(); return; }
-                finish();
-              });
-            }
-            if (Object.keys(writes).length === 0) {
-              doRemove();
-            } else {
-              chrome.storage.local.set(writes, function () {
-                if (chrome.runtime.lastError) { resolve(); return; }
-                doRemove();
-              });
-            }
-          });
-        });
-      } catch (e) { resolve(); }
-    });
-  });
-  return __0tabMigrationV2Promise;
-}
-__0tabEnsureMigratedV2();
-
-function storageGet(keys) {
-  return __0tabEnsureMigratedV2().then(function () {
-    return new Promise(function (resolve, reject) {
-      chrome.storage.local.get(keys, function (result) {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve(result);
-      });
-    });
-  });
-}
-
-function storageSet(data) {
-  return __0tabEnsureMigratedV2().then(function () {
-    return new Promise(function (resolve, reject) {
-      chrome.storage.local.set(data, function () {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve();
-      });
-    });
-  });
-}
-
-function storageRemove(keys) {
-  return __0tabEnsureMigratedV2().then(function () {
-    return new Promise(function (resolve, reject) {
-      chrome.storage.local.remove(keys, function () {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve();
-      });
-    });
-  });
-}
-
-function isValidUrl(str) {
-  try {
-    let url = new URL(str);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch (e) {
-    return false;
-  }
-}
-
-// Broader check: anything that can be bookmarked (http, https, chrome-extension, file, ftp, etc.)
-function isSaveableUrl(str) {
-  if (!str) return false;
-  let blocked = ['about:blank', 'about:newtab', 'chrome://newtab/', 'chrome://new-tab-page/'];
-  if (blocked.includes(str)) return false;
-  try { new URL(str); return true; } catch (e) { return false; }
-}
-
-function debounce(fn, delay) {
-  let timer;
-  return function () {
-    clearTimeout(timer);
-    timer = setTimeout(fn, delay);
-  };
-}
-
-function escapeHtml(text) {
-  let div = document.createElement('div');
-  div.textContent = text;
-  return div.innerHTML;
-}
 
 // ============================================================
 // TAG GENERATION
@@ -427,6 +130,44 @@ function createTagsInput(containerId, existingTags) {
 }
 
 // ============================================================
+// CACHED STORAGE — avoids repeated storageGet(null) full reads
+// ============================================================
+let _dashStoreCache = null;
+let _dashStoreCacheTime = 0;
+
+async function dashStorageGetAll() {
+  let now = Date.now();
+  if (_dashStoreCache && (now - _dashStoreCacheTime) < 5000) return _dashStoreCache;
+  _dashStoreCache = await storageGet(null);
+  _dashStoreCacheTime = now;
+  return _dashStoreCache;
+}
+
+function invalidateDashCache() { _dashStoreCache = null; }
+
+try {
+  chrome.storage.onChanged.addListener(function (changes, area) {
+    if (area === 'local') invalidateDashCache();
+  });
+} catch (e) {}
+
+// ============================================================
+// FOLDER SELECT HELPER
+// ============================================================
+function buildFolderSelectData(folders, includeNoFolder) {
+  folders = folders || [];
+  let options = folders.map(function (f) {
+    let indent = '';
+    for (let i = 0; i < f.depth; i++) indent += '\u00A0\u00A0';
+    return { value: f.id, label: indent + (f.title || '(Untitled)') };
+  });
+  if (includeNoFolder) {
+    options.unshift({ value: '', label: 'No folder' });
+  }
+  return options;
+}
+
+// ============================================================
 // TOAST
 // ============================================================
 function showToast(message, type) {
@@ -444,6 +185,63 @@ function showToast(message, type) {
 // ============================================================
 // MODAL
 // ============================================================
+// Fuzzy near-miss lookup for the omnibox "shortcut not found" dialog:
+// matches the missed keyword against shortcut names (incl. small typos),
+// tags, bookmark titles, and URL hosts. Returns the top 4 by score.
+function _nfEditDistance(a, b) {
+  a = a.slice(0, 24); b = b.slice(0, 24);
+  let m = a.length, n = b.length;
+  if (!m) return n;
+  if (!n) return m;
+  let prev = [];
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    let cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+function findShortcutSuggestions(query, all) {
+  let q = String(query || '').trim().toLowerCase();
+  if (!q) return [];
+  let out = [];
+  Object.keys(all).filter(isShortcutKey).forEach(function (key) {
+    let data = all[key];
+    if (data && typeof data === 'object' && data.type === 'folder') return;
+    let url = typeof data === 'object' ? (data.url || '') : String(data || '');
+    if (!url) return;
+    let name = key.toLowerCase();
+    let tags = (typeof data === 'object' && Array.isArray(data.tags)) ? data.tags : [];
+    let title = (typeof data === 'object' && data.bookmarkTitle) ? String(data.bookmarkTitle).toLowerCase() : '';
+    let score = 0;
+    // Containment needs a minimum length on the contained side, or 1-2
+    // char names ("a", "cs") match nearly every missed keyword.
+    if (name === q) score = 100;
+    else if ((q.length >= 2 && name.startsWith(q)) || (name.length >= 2 && q.startsWith(name))) score = 80;
+    else if ((q.length >= 2 && name.includes(q)) || (name.length >= 3 && q.includes(name))) score = 60;
+    else {
+      let d = _nfEditDistance(name, q);
+      if (d <= 2 && Math.max(name.length, q.length) >= 3) score = 70 - d * 10;
+    }
+    if (!score) {
+      if (tags.some(function (t) { return String(t).toLowerCase().includes(q); })) score = 40;
+      else if (title.includes(q)) score = 35;
+      else {
+        let host = '';
+        try { host = new URL(url).hostname.toLowerCase(); } catch (e) {}
+        if (host.includes(q)) score = 30;
+      }
+    }
+    if (score > 0) out.push({ key: key, url: url, score: score });
+  });
+  out.sort(function (a, b) { return b.score - a.score; });
+  return out.slice(0, 4);
+}
+
 function showModal(options) {
   let overlay = document.getElementById('dashModalOverlay');
   document.getElementById('dashModalTitle').textContent = options.title || '';
@@ -453,6 +251,8 @@ function showModal(options) {
   let actionsEl = document.getElementById('dashModalActions');
   inputsEl.innerHTML = '';
   actionsEl.innerHTML = '';
+  // Reset layout modifiers a previous modal's afterRender may have added
+  actionsEl.className = 'modal-actions';
 
   if (options.inputs) {
     options.inputs.forEach(function (inp) {
@@ -503,6 +303,7 @@ function showModal(options) {
         input.value = inp.value || '';
         input.placeholder = inp.placeholder || '';
         input.className = 'dm-input';
+        if (inp.noSpaces) enforceShortcutNameInput(input);
       }
 
       inputsEl.appendChild(label);
@@ -531,7 +332,14 @@ function showModal(options) {
   }
 
   overlay.classList.remove('hidden');
-  let firstInput = inputsEl.querySelector('input, select');
+  // Move focus into the dialog even when it has no inputs (button-only
+  // confirms) — otherwise the overlay's Escape/Tab-trap keydown never fires.
+  // Prefer the cancel-style button so Enter can never trigger a destructive
+  // default (e.g. the import-conflict dialog lists Replace first).
+  let firstInput = inputsEl.querySelector('input, select')
+    || actionsEl.querySelector('.dm-btn-cancel')
+    || actionsEl.querySelector('.dm-btn-outline')
+    || actionsEl.querySelector('button');
   if (firstInput) setTimeout(() => firstInput.focus(), 50);
   if (options.afterRender) setTimeout(() => options.afterRender(), 60);
 }
@@ -548,6 +356,31 @@ document.getElementById('dashModalOverlay').addEventListener('click', function (
   let cancelBtn = actions && (actions.querySelector('.dm-btn-cancel') || actions.querySelector('.dm-btn-outline') || actions.querySelector('button'));
   if (cancelBtn) { cancelBtn.click(); return; }
   hideModal();
+});
+
+// Focus trap + Escape, mirroring the popup modal. Keeping focus inside the
+// dialog also prevents Tab-escaping to the chat input mid-flow (e.g. typing
+// 'skip' in the organize workflow while its folder modal is still open).
+document.getElementById('dashModalOverlay').addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') {
+    let actions = document.getElementById('dashModalActions');
+    let cancelBtn = actions && (actions.querySelector('.dm-btn-cancel') || actions.querySelector('.dm-btn-outline') || actions.querySelector('button'));
+    if (cancelBtn) { cancelBtn.click(); } else { hideModal(); }
+    return;
+  }
+  if (e.key === 'Tab') {
+    let focusable = this.querySelectorAll('input, select, textarea, button, [tabindex]:not([tabindex="-1"])');
+    if (focusable.length === 0) { e.preventDefault(); return; }
+    let first = focusable[0];
+    let last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
 });
 
 // ============================================================
@@ -673,7 +506,7 @@ async function loadShortcutsTable() {
   let filterVal = document.getElementById('shortcutFilter') ? document.getElementById('shortcutFilter').value : 'most-used';
 
   try {
-    let items = await storageGet(null);
+    let items = await dashStorageGetAll();
     let tbody = document.getElementById('shortcutsTableBody');
     tbody.innerHTML = '';
 
@@ -822,7 +655,7 @@ async function loadShortcutsTable() {
       let deleteBtn = document.createElement('button');
       deleteBtn.className = 'btn btn-sm btn-delete';
       deleteBtn.textContent = 'Delete';
-      deleteBtn.addEventListener('click', () => deleteShortcutDash(key, url));
+      deleteBtn.addEventListener('click', () => deleteShortcutDash(key));
       tdActions.appendChild(deleteBtn);
 
       tr.appendChild(tdActions);
@@ -870,20 +703,13 @@ document.getElementById('addShortcutBtn').addEventListener('click', async functi
   // Load folders for folder dropdown
   chrome.runtime.sendMessage({ action: 'getBookmarkFolders' }, function (folders) {
     if (chrome.runtime.lastError) folders = [];
-    folders = folders || [];
-    let folderSelectData = [{ value: '', label: 'No folder' }].concat(
-      folders.map(function (f) {
-        let indent = '';
-        for (let i = 0; i < f.depth; i++) indent += '\u00A0\u00A0';
-        return { value: f.id, label: indent + (f.title || '(Untitled)') };
-      })
-    );
+    let folderSelectData = buildFolderSelectData(folders, true);
 
     showModal({
       title: 'New Shortcut',
       inputs: [
         { id: 'url', label: 'URL', value: prefillUrl, placeholder: 'https://example.com' },
-        { id: 'name', label: '0tab Shortcut (max 15 chars, no spaces)', value: suggestedName, placeholder: 'e.g. yt' },
+        { id: 'name', label: '0tab Shortcut (max 15 chars, no spaces)', value: suggestedName, placeholder: 'e.g. yt', noSpaces: true },
         { id: 'folder', label: 'Bookmark Folder', type: 'select', selectOptions: folderSelectData, value: '' },
         { id: 'tags', label: 'Tags (optional, up to 5, press Enter to add)', type: 'tags' }
       ],
@@ -902,7 +728,7 @@ document.getElementById('addShortcutBtn').addEventListener('click', async functi
             if (/\s/.test(name)) { showToast('No spaces in name.', 'error'); return; }
             if (!url || !isSaveableUrl(url)) { showToast('Valid URL required.', 'error'); return; }
             try {
-              let all = await storageGet(null);
+              let all = await dashStorageGetAll();
               if (all[name] && isShortcutKey(name)) { showToast(name + ' already exists!', 'error'); return; }
               // Default to 0tab Shortcuts folder if none selected
               if (!folderId) {
@@ -985,7 +811,7 @@ function editShortcutDash(key, url, count) {
       showModal({
         title: 'Edit Folder Shortcut',
         inputs: [
-          { id: 'name', label: 'Shortcut name', value: key, placeholder: 'e.g. work' },
+          { id: 'name', label: 'Shortcut name', value: key, placeholder: 'e.g. work', noSpaces: true },
           { id: 'tags', label: 'Tags (up to 5, press Enter to add)', type: 'tags' }
         ],
         _tagsInputs: [editTagsConf],
@@ -998,10 +824,10 @@ function editShortcutDash(key, url, count) {
               if (!newName) { showToast('Name required.', 'error'); return; }
               if (newName.length > 15) { showToast('Name too long.', 'error'); return; }
               try {
-                let all = await storageGet(null);
+                let all = await dashStorageGetAll();
                 if (all[newName] && newName !== key) { showToast(newName + ' already exists!', 'error'); return; }
                 await storageRemove(key);
-                await storageSet({ [newName]: { type: 'folder', urls: data.urls || [], folderId: data.folderId, folderTitle: data.folderTitle || newName, count: data.count || 0, tags: tags, createdAt: data.createdAt || Date.now() } });
+                await storageSet({ [newName]: { type: 'folder', urls: data.urls || [], folderId: data.folderId || data.bmFolderId, bmFolderId: data.folderId || data.bmFolderId, folderTitle: data.folderTitle || newName, count: data.count || 0, tags: tags, createdAt: data.createdAt || Date.now() } });
                 showToast('Updated ' + newName, 'success');
                 loadShortcutsTable();
               } catch (err) { showToast('Error: ' + err.message, 'error'); }
@@ -1015,19 +841,12 @@ function editShortcutDash(key, url, count) {
     // Load folders for folder dropdown (regular shortcuts only)
     chrome.runtime.sendMessage({ action: 'getBookmarkFolders' }, function (folders) {
       if (chrome.runtime.lastError) folders = [];
-      folders = folders || [];
-      let folderSelectData = [{ value: '', label: 'No folder' }].concat(
-        folders.map(function (f) {
-          let indent = '';
-          for (let i = 0; i < f.depth; i++) indent += '\u00A0\u00A0';
-          return { value: f.id, label: indent + (f.title || '(Untitled)') };
-        })
-      );
+      let folderSelectData = buildFolderSelectData(folders, true);
 
       showModal({
         title: 'Edit ' + key,
         inputs: [
-          { id: 'name', label: 'Shortcut name', value: key, placeholder: 'e.g. yt' },
+          { id: 'name', label: 'Shortcut name', value: key, placeholder: 'e.g. yt', noSpaces: true },
           { id: 'url', label: 'URL', value: url, placeholder: 'https://example.com' },
           { id: 'tags', label: 'Tags (up to 5, press Enter to add)', type: 'tags' },
           { id: 'folder', label: 'Folder', type: 'select', selectOptions: folderSelectData, value: '' }
@@ -1047,7 +866,7 @@ function editShortcutDash(key, url, count) {
               if (/\s/.test(newName)) { showToast('No spaces.', 'error'); return; }
               if (!newUrl || !isSaveableUrl(newUrl)) { showToast('Invalid URL.', 'error'); return; }
               try {
-                let all = await storageGet(null);
+                let all = await dashStorageGetAll();
                 if (all[newName] && newName !== key) { showToast(newName + ' already exists!', 'error'); return; }
                 let oldData = all[key] || {};
                 let preservedData = typeof oldData === 'object' ? oldData : {};
@@ -1085,14 +904,17 @@ async function addToTrashManage(name, data) {
       trashItem.type = 'folder';
       trashItem.urls = data.urls || [];
       trashItem.urlTitles = data.urlTitles || [];
-      trashItem.folderId = data.folderId || '';
+      trashItem.folderId = data.folderId || data.bmFolderId || '';
       trashItem.folderTitle = data.folderTitle || '';
     }
     trash.push(trashItem);
     let cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
     trash = trash.filter(function (t) { return t.deletedAt > cutoff; });
     await storageSet({ '__0tab_trash': trash });
-  } catch (e) { /* silently fail */ }
+  } catch (e) {
+    console.warn('0tab: addToTrashManage failed:', e);
+    showToast('Could not move "' + name + '" to trash — restore from trash won\'t be possible.', 'error');
+  }
 }
 
 function deleteShortcutDash(key) {
@@ -1123,24 +945,6 @@ function deleteShortcutDash(key) {
 // ============================================================
 // STATS VIEW (enhanced)
 // ============================================================
-// Helper: format relative time
-function formatTimeAgo(timestamp) {
-  if (!timestamp) return 'Never';
-  let diff = Date.now() - timestamp;
-  let mins = Math.floor(diff / 60000);
-  if (mins < 1) return 'Just now';
-  if (mins < 60) return mins + 'm ago';
-  let hrs = Math.floor(mins / 60);
-  if (hrs < 24) return hrs + 'h ago';
-  let days = Math.floor(hrs / 24);
-  if (days < 30) return days + 'd ago';
-  let months = Math.floor(days / 30);
-  if (months < 12) return months + 'mo ago';
-  return Math.floor(months / 12) + 'y ago';
-}
-
-let _statsCurrentPeriod = 'daily';
-
 // ============================================================
 // INSIGHTS VIEW — narrative-driven analytics
 // Pulls from: chrome.storage.local shortcut metadata (count, lastAccessed,
@@ -1207,7 +1011,7 @@ function insightsFavicon(url, size) {
 async function loadStatsView() {
   try {
     // ---- Data gathering ----
-    let items = await storageGet(null);
+    let items = await dashStorageGetAll();
     let keys = Object.keys(items).filter(isShortcutKey);
     let shortcuts = keys.map(function (k) {
       let d = items[k]; if (typeof d === 'string') d = { url: d, count: 0 };
@@ -1279,7 +1083,7 @@ async function loadStatsView() {
     }
     if (heroSubEl) {
       let parts = [];
-      if (top && (top.count || 0) > 0) parts.push('Most used: <strong>' + tab0EscapeHtml(top.name) + '</strong> (' + top.count + ' opens)');
+      if (top && (top.count || 0) > 0) parts.push('Most used: <strong>' + escapeHtml(top.name) + '</strong> (' + top.count + ' opens)');
       if (activeShortcuts.length > 0) parts.push(activeShortcuts.length + ' active shortcut' + (activeShortcuts.length !== 1 ? 's' : '') + ' in last 30 days');
       heroSubEl.innerHTML = parts.length > 0 ? parts.join(' · ') : 'Tip: the dashboard updates live as you open shortcuts.';
     }
@@ -1338,9 +1142,9 @@ async function loadStatsView() {
         card.className = 'insights-kpi';
         let sparkHtml = k.spark ? insightsBuildSparkline(k.spark, 140, 24) : '';
         let deltaHtml = insightsDeltaEl(k.delta);
-        let subHtml = k.sub ? '<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">' + tab0EscapeHtml(k.sub) + '</div>' : '';
+        let subHtml = k.sub ? '<div style="font-size:10px;color:var(--text-muted);margin-top:2px;">' + escapeHtml(k.sub) + '</div>' : '';
         card.innerHTML =
-          '<div class="insights-kpi-label">' + tab0EscapeHtml(k.label) + '</div>' +
+          '<div class="insights-kpi-label">' + escapeHtml(k.label) + '</div>' +
           '<div class="insights-kpi-value">' + k.value + '</div>' +
           deltaHtml + subHtml + sparkHtml;
         kpiRow.appendChild(card);
@@ -1395,7 +1199,7 @@ async function loadStatsView() {
           let row = document.createElement('div');
           row.className = 'insights-bar-row';
           row.innerHTML =
-            '<div class="insights-bar-name" title="' + tab0EscapeHtml(s.url || '') + '">' + tab0EscapeHtml(s.name) + '</div>' +
+            '<div class="insights-bar-name" title="' + escapeHtml(s.url || '') + '">' + escapeHtml(s.name) + '</div>' +
             '<div class="insights-bar-track"><div class="insights-bar-fill" style="width:' + Math.max(2, Math.round((s.count / maxC) * 100)) + '%;"></div></div>' +
             '<div class="insights-bar-count">' + (s.count || 0) + '</div>';
           topChart.appendChild(row);
@@ -1424,7 +1228,7 @@ async function loadStatsView() {
         tagEntries.slice(0, 20).forEach(function (e) {
           let chip = document.createElement('span');
           chip.className = 'insights-tag-chip';
-          chip.innerHTML = '#' + tab0EscapeHtml(e.tag) + ' <b>' + e.n + '</b>';
+          chip.innerHTML = '#' + escapeHtml(e.tag) + ' <b>' + e.n + '</b>';
           tagCloud.appendChild(chip);
         });
         let untagged = shortcuts.filter(function (s) { return (!s.tags || s.tags.length === 0) && s.type !== 'folder'; }).length;
@@ -1454,7 +1258,7 @@ async function loadStatsView() {
           row.innerHTML =
             '<img class="insights-list-row-fav" src="' + insightsFavicon(s.url, 32) + '" data-hide-on-error="visibility">' +
             '<div class="insights-list-row-main">' +
-              '<div class="insights-list-row-name">' + tab0EscapeHtml(s.name) + '</div>' +
+              '<div class="insights-list-row-name">' + escapeHtml(s.name) + '</div>' +
               '<div class="insights-list-row-meta">' + ago + ' · ' + (s.count || 0) + ' opens</div>' +
             '</div>' +
             '<span class="insights-list-row-delta insights-list-row-delta-up">active</span>';
@@ -1462,6 +1266,7 @@ async function loadStatsView() {
           row.addEventListener('click', function (ev) {
             // Default: open in new tab so the dashboard stays put.
             // Cmd/Ctrl+click replaces the current tab instead.
+            if (!isOpenableUrl(s.url)) return;
             if (ev.metaKey || ev.ctrlKey) chrome.tabs.update({ url: s.url });
             else chrome.tabs.create({ url: s.url });
           });
@@ -1488,7 +1293,7 @@ async function loadStatsView() {
           row.innerHTML =
             '<img class="insights-list-row-fav" src="' + insightsFavicon(s.url, 32) + '" data-hide-on-error="visibility">' +
             '<div class="insights-list-row-main">' +
-              '<div class="insights-list-row-name">' + tab0EscapeHtml(s.name) + '</div>' +
+              '<div class="insights-list-row-name">' + escapeHtml(s.name) + '</div>' +
               '<div class="insights-list-row-meta">last: ' + ago + ' · ' + (s.count || 0) + ' opens</div>' +
             '</div>' +
             '<span class="insights-list-row-delta insights-list-row-delta-down">idle</span>';
@@ -1496,6 +1301,7 @@ async function loadStatsView() {
           row.addEventListener('click', function (ev) {
             // Default: open in new tab so the dashboard stays put.
             // Cmd/Ctrl+click replaces the current tab instead.
+            if (!isOpenableUrl(s.url)) return;
             if (ev.metaKey || ev.ctrlKey) chrome.tabs.update({ url: s.url });
             else chrome.tabs.create({ url: s.url });
           });
@@ -1523,12 +1329,13 @@ async function loadStatsView() {
           row.innerHTML =
             '<img class="insights-list-row-fav" src="' + insightsFavicon(s.url, 32) + '" data-hide-on-error="visibility">' +
             '<div class="insights-list-row-main">' +
-              '<div class="insights-list-row-name">' + tab0EscapeHtml(s.name) + '</div>' +
-              '<div class="insights-list-row-meta">' + (s.url ? tab0EscapeHtml((new URL(s.url).hostname || '').replace(/^www\./, '')) : 'no url') + '</div>' +
+              '<div class="insights-list-row-name">' + escapeHtml(s.name) + '</div>' +
+              '<div class="insights-list-row-meta">' + (s.url ? escapeHtml((new URL(s.url).hostname || '').replace(/^www\./, '')) : 'no url') + '</div>' +
             '</div>';
           row.style.cursor = s.url ? 'pointer' : 'default';
           if (s.url) row.addEventListener('click', function (ev) {
             // Default: new tab. Cmd/Ctrl+click replaces current tab.
+            if (!isOpenableUrl(s.url)) return;
             if (ev.metaKey || ev.ctrlKey) chrome.tabs.update({ url: s.url });
             else chrome.tabs.create({ url: s.url });
           });
@@ -1557,64 +1364,194 @@ async function loadSettingsState() {
     document.getElementById('settingBookmarkSync').checked = settings.bookmarkSync !== false;
     document.getElementById('settingTabGroupFolders').checked = settings.tabGroupFolders !== false;
 
-    // AI settings — auto-enabled when model is ready
+    // AI settings — provider selection, OpenAI config, and feature toggles
     let aiToggle = document.getElementById('settingAiFeatures');
     if (aiToggle) {
       aiToggle.checked = settings.aiEnabled === true;
-      // Check actual AI availability and update UI
-      chrome.runtime.sendMessage({ action: 'ai:status' }, function (response) {
-        if (chrome.runtime.lastError) return;
-        let statusEl = document.getElementById('aiStatusText');
-        let downloadArea = document.getElementById('aiDownloadArea');
-        let helpLinks = document.getElementById('aiHelpLinks');
-        if (!statusEl || !response) return;
+      updateAiConfigDisabled(aiToggle.checked);
 
-        if (response.status === 'readily') {
-          statusEl.textContent = 'Gemini Nano is ready';
-          statusEl.style.color = 'var(--success)';
-          if (downloadArea) downloadArea.style.display = 'none';
-          // Auto-check the toggle since model is ready
-          if (!aiToggle.checked) {
-            aiToggle.checked = true;
-            // Save the setting
-            storageGet('__0tab_settings').then(function (r) {
-              let s = r['__0tab_settings'] || {};
-              s.aiEnabled = true;
-              storageSet({ '__0tab_settings': s });
-            });
-          }
-        } else if (response.status === 'after-download') {
-          statusEl.textContent = 'Model available — download to enable';
-          statusEl.style.color = 'var(--accent-primary)';
-          if (downloadArea) downloadArea.style.display = 'block';
-          if (helpLinks) helpLinks.style.display = 'block';
-          // Auto-disable if toggle was on but model not downloaded
-          if (aiToggle.checked) {
-            aiToggle.checked = false;
-            storageGet('__0tab_settings').then(function (r) {
-              let s = r['__0tab_settings'] || {};
-              s.aiEnabled = false;
-              storageSet({ '__0tab_settings': s });
-            });
-          }
-        } else {
-          statusEl.textContent = 'Not available on this browser';
-          statusEl.style.color = 'var(--text-muted)';
-          if (downloadArea) downloadArea.style.display = 'none';
-          if (helpLinks) helpLinks.style.display = 'block';
-          // Auto-disable if toggle was on but AI not available
-          if (aiToggle.checked) {
-            aiToggle.checked = false;
-            storageGet('__0tab_settings').then(function (r) {
-              let s = r['__0tab_settings'] || {};
-              s.aiEnabled = false;
-              storageSet({ '__0tab_settings': s });
-            });
-          }
-        }
+      // Provider selector + per-provider enable switches
+      let provider = settings.aiProvider === 'openai' ? 'openai' : 'nano';
+      syncProviderEnableUI(settings.aiEnabled === true, provider);
+
+      // OpenAI config fields
+      let modelSelect = document.getElementById('openaiModelSelect');
+      if (modelSelect) modelSelect.value = settings.openaiModel || 'gpt-4o-mini';
+      let keyInput = document.getElementById('openaiKeyInput');
+      if (keyInput) keyInput.value = settings.openaiApiKey || '';
+
+      // Feature toggles (defaults applied when aiFeatures is missing)
+      let features = Object.assign({}, AI_FEATURE_DEFAULTS, settings.aiFeatures || {});
+      document.querySelectorAll('.ai-feature-toggle').forEach(function (el) {
+        el.checked = features[el.getAttribute('data-feature')] === true;
       });
+
+      // Check actual AI availability and update the status area
+      refreshAiStatus();
     }
   } catch (e) {}
+}
+
+// AI feature defaults — mirror the backend contract in background.js
+const AI_FEATURE_DEFAULTS = { tags: true, search: true, name: true, description: true, chat: true, duplicates: false };
+
+// Gray out the provider selector + feature list when the master AI toggle is off
+function updateAiConfigDisabled(enabled) {
+  let area = document.getElementById('aiConfigArea');
+  if (area) area.classList.toggle('ai-config-disabled', !enabled);
+}
+
+// Show the detail block for the selected provider
+function updateAiProviderUI(provider) {
+  let nanoDetail = document.getElementById('aiNanoDetail');
+  let openaiDetail = document.getElementById('aiOpenaiDetail');
+  if (nanoDetail) nanoDetail.style.display = provider === 'nano' ? 'block' : 'none';
+  if (openaiDetail) openaiDetail.style.display = provider === 'openai' ? 'block' : 'none';
+}
+
+// Reflect (enabled, provider) across every AI control: the per-provider
+// enable switches (mutually exclusive), the provider radios, the master
+// toggle, the detail area, and the disabled overlay.
+function syncProviderEnableUI(enabled, provider) {
+  let nanoOn = enabled && provider === 'nano';
+  let openaiOn = enabled && provider === 'openai';
+  let nanoT = document.getElementById('aiNanoEnableToggle');
+  let openaiT = document.getElementById('aiOpenaiEnableToggle');
+  let nanoTx = document.getElementById('aiNanoEnableText');
+  let openaiTx = document.getElementById('aiOpenaiEnableText');
+  if (nanoT) nanoT.checked = nanoOn;
+  if (openaiT) openaiT.checked = openaiOn;
+  if (nanoTx) nanoTx.textContent = nanoOn ? 'Enabled' : 'Disabled';
+  if (openaiTx) openaiTx.textContent = openaiOn ? 'Enabled' : 'Disabled';
+  let nanoRadio = document.getElementById('aiProviderNano');
+  let openaiRadio = document.getElementById('aiProviderOpenai');
+  if (nanoRadio) nanoRadio.checked = provider === 'nano';
+  if (openaiRadio) openaiRadio.checked = provider === 'openai';
+  let master = document.getElementById('settingAiFeatures');
+  if (master) master.checked = enabled;
+  updateAiProviderUI(provider);
+  updateAiConfigDisabled(enabled);
+}
+
+// One provider enabled at a time: enabling a provider makes it active and
+// switches the other off; disabling the active provider turns AI off.
+async function setProviderEnabled(provider, on) {
+  await saveAiSetting(function (s) {
+    if (on) {
+      s.aiEnabled = true;
+      s.aiProvider = provider;
+    } else if ((s.aiProvider === 'openai' ? 'openai' : 'nano') === provider) {
+      s.aiEnabled = false;
+    }
+  });
+  let result = await storageGet('__0tab_settings');
+  let s = result['__0tab_settings'] || {};
+  syncProviderEnableUI(s.aiEnabled === true, s.aiProvider === 'openai' ? 'openai' : 'nano');
+  refreshAiStatus();
+}
+
+// Read-modify-write the settings object so other keys are never clobbered.
+// Chained through a promise queue so rapid toggles don't clobber each other.
+let _aiSettingsQueue = Promise.resolve();
+async function saveAiSetting(mutator) {
+  let step = _aiSettingsQueue.then(async () => {
+    let result = await storageGet('__0tab_settings');
+    let settings = result['__0tab_settings'] || {};
+    mutator(settings);
+    await storageSet({ '__0tab_settings': settings });
+  });
+  // Swallow the failure on the queue itself so one rejected write doesn't
+  // poison every later save; the caller still sees the rejection via `step`.
+  _aiSettingsQueue = step.catch(function () {});
+  return step;
+}
+
+// Query ai:status and render the status line for the active provider
+function refreshAiStatus() {
+  chrome.runtime.sendMessage({ action: 'ai:status' }, function (response) {
+    if (chrome.runtime.lastError || !response) return;
+    let aiToggle = document.getElementById('settingAiFeatures');
+
+    if (response.provider === 'openai') {
+      let openaiStatusEl = document.getElementById('openaiStatusText');
+      if (!openaiStatusEl) return;
+      if (response.status === 'readily') {
+        openaiStatusEl.textContent = 'ChatGPT is ready' + (response.model ? ' (' + response.model + ')' : '') + '.';
+        openaiStatusEl.style.color = 'var(--success)';
+      } else {
+        openaiStatusEl.textContent = 'Add your OpenAI API key to enable AI features.';
+        openaiStatusEl.style.color = 'var(--text-secondary)';
+      }
+      return;
+    }
+
+    // Nano provider — keep the original availability / download flow
+    let statusEl = document.getElementById('aiStatusText');
+    let downloadArea = document.getElementById('aiDownloadArea');
+    let helpLinks = document.getElementById('aiHelpLinks');
+    if (!statusEl || !aiToggle) return;
+
+    if (response.status === 'readily') {
+      statusEl.textContent = 'Gemini Nano is ready';
+      statusEl.style.color = 'var(--success)';
+      if (downloadArea) downloadArea.style.display = 'none';
+      // Auto-check the toggle since model is ready
+      if (!aiToggle.checked) {
+        aiToggle.checked = true;
+        updateAiConfigDisabled(true);
+        // Through the queue so it can't clobber a pending user save
+        saveAiSetting(function (s) { s.aiEnabled = true; }).catch(function () {});
+      }
+    } else if (response.status === 'after-download' || response.status === 'downloadable' || response.status === 'downloading') {
+      statusEl.textContent = 'Gemini Nano model not downloaded yet — download it to enable AI features.';
+      statusEl.style.color = 'var(--accent)';
+      if (downloadArea) downloadArea.style.display = 'block';
+      if (helpLinks) helpLinks.style.display = 'block';
+      // Auto-disable if toggle was on but model not downloaded
+      if (aiToggle.checked) {
+        aiToggle.checked = false;
+        updateAiConfigDisabled(false);
+        saveAiSetting(function (s) { s.aiEnabled = false; }).catch(function () {});
+      }
+    } else {
+      let applyUnavailable = function () {
+        statusEl.textContent = 'AI features need Chrome\'s built-in Gemini Nano model, which is not available on this browser.';
+        statusEl.style.color = 'var(--text-muted)';
+        if (downloadArea) downloadArea.style.display = 'none';
+        if (helpLinks) helpLinks.style.display = 'block';
+        // Auto-disable if toggle was on but AI not available
+        if (aiToggle.checked) {
+          aiToggle.checked = false;
+          updateAiConfigDisabled(false);
+          saveAiSetting(function (s) { s.aiEnabled = false; }).catch(function () {});
+        }
+      };
+      let applyDownloadable = function () {
+        statusEl.textContent = 'Gemini Nano model not downloaded yet — download it to enable AI features.';
+        statusEl.style.color = 'var(--accent)';
+        if (downloadArea) downloadArea.style.display = 'block';
+        if (helpLinks) helpLinks.style.display = 'block';
+      };
+      // The background check can't distinguish "model downloadable but not
+      // downloaded" from "unavailable" — probe the Prompt API from this
+      // page directly when possible before declaring it unavailable.
+      try {
+        if (typeof LanguageModel !== 'undefined' && typeof LanguageModel.availability === 'function') {
+          // Declare languages — Chrome logs a "No output language was
+          // specified" warning on LanguageModel requests without them.
+          LanguageModel.availability({
+            expectedInputs: [{ type: 'text', languages: ['en'] }],
+            expectedOutputs: [{ type: 'text', languages: ['en'] }]
+          }).then(function (a) {
+            if (a === 'downloadable' || a === 'downloading' || a === 'after-download') applyDownloadable();
+            else applyUnavailable();
+          }).catch(applyUnavailable);
+        } else {
+          applyUnavailable();
+        }
+      } catch (e) { applyUnavailable(); }
+    }
+  });
 }
 
 document.getElementById('settingBookmarkSync').addEventListener('change', async function () {
@@ -1648,8 +1585,11 @@ if (aiToggleGlobal) {
   aiToggleGlobal.addEventListener('change', async function () {
     let toggle = this;
     try {
-      if (toggle.checked) {
-        // Check AI availability before allowing enable
+      let openaiRadio = document.getElementById('aiProviderOpenai');
+      let provider = (openaiRadio && openaiRadio.checked) ? 'openai' : 'nano';
+      if (toggle.checked && provider === 'nano') {
+        // Check AI availability before allowing enable (nano only —
+        // the OpenAI path just needs a key, surfaced by the status line)
         let aiStatus = await new Promise(function (resolve) {
           let timeout = setTimeout(function () { resolve({ available: false, status: 'no' }); }, 3000);
           chrome.runtime.sendMessage({ action: 'ai:status' }, function (r) {
@@ -1668,10 +1608,12 @@ if (aiToggleGlobal) {
           return;
         }
       }
-      let result = await storageGet('__0tab_settings');
-      let settings = result['__0tab_settings'] || {};
-      settings.aiEnabled = toggle.checked;
-      await storageSet({ '__0tab_settings': settings });
+      let providerAfterSave = 'nano';
+      await saveAiSetting(function (settings) {
+        settings.aiEnabled = toggle.checked;
+        providerAfterSave = settings.aiProvider === 'openai' ? 'openai' : 'nano';
+      });
+      syncProviderEnableUI(toggle.checked, providerAfterSave);
       showToast('AI features ' + (toggle.checked ? 'enabled' : 'disabled'), 'success');
     } catch (e) {
       showToast('Error saving setting.', 'error');
@@ -1708,8 +1650,7 @@ if (aiDownloadBtn) {
           statusEl.textContent = 'Gemini Nano is ready';
           statusEl.style.color = 'var(--success)';
         }
-        let toggle = document.getElementById('settingAiFeatures');
-        if (toggle) toggle.checked = true;
+        syncProviderEnableUI(true, 'nano');
         showToast('Gemini Nano downloaded and enabled!', 'success');
       } else {
         btn.disabled = false;
@@ -1721,12 +1662,155 @@ if (aiDownloadBtn) {
   });
 }
 
+// AI provider selector — clicking a card enables that provider (and
+// therefore disables the other; only one can be enabled at a time)
+document.querySelectorAll('input[name="aiProvider"]').forEach(function (radio) {
+  radio.addEventListener('change', async function () {
+    if (!this.checked) return;
+    let provider = this.value === 'openai' ? 'openai' : 'nano';
+    try {
+      await setProviderEnabled(provider, true);
+    } catch (e) {
+      showToast('Error saving setting.', 'error');
+    }
+  });
+});
+
+// Per-provider enable switches — mutually exclusive by construction
+[['aiNanoEnableToggle', 'nano'], ['aiOpenaiEnableToggle', 'openai']].forEach(function (pair) {
+  let el = document.getElementById(pair[0]);
+  if (!el) return;
+  el.addEventListener('change', async function () {
+    try {
+      await setProviderEnabled(pair[1], this.checked);
+      showToast(
+        this.checked
+          ? (pair[1] === 'openai' ? 'ChatGPT enabled' : 'Gemini Nano enabled')
+          : 'AI features disabled',
+        'success'
+      );
+    } catch (e) {
+      showToast('Error saving setting.', 'error');
+    }
+  });
+});
+
+// OpenAI model dropdown
+let openaiModelSelect = document.getElementById('openaiModelSelect');
+if (openaiModelSelect) {
+  openaiModelSelect.addEventListener('change', async function () {
+    let model = this.value;
+    try {
+      await saveAiSetting(function (s) { s.openaiModel = model; });
+      refreshAiStatus();
+    } catch (e) {
+      showToast('Error saving setting.', 'error');
+    }
+  });
+}
+
+// OpenAI API key input — stored trimmed, local only
+let openaiKeyInput = document.getElementById('openaiKeyInput');
+if (openaiKeyInput) {
+  openaiKeyInput.addEventListener('change', async function () {
+    let key = this.value.trim();
+    this.value = key;
+    try {
+      await saveAiSetting(function (s) { s.openaiApiKey = key; });
+      refreshAiStatus();
+    } catch (e) {
+      showToast('Error saving setting.', 'error');
+    }
+  });
+}
+
+// Show/hide the API key
+let openaiKeyToggle = document.getElementById('openaiKeyToggle');
+if (openaiKeyToggle) {
+  openaiKeyToggle.addEventListener('click', function () {
+    let input = document.getElementById('openaiKeyInput');
+    if (!input) return;
+    let show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    this.textContent = show ? 'Hide' : 'Show';
+    this.setAttribute('aria-label', show ? 'Hide API key' : 'Show API key');
+  });
+}
+
+// Test the OpenAI key via the background worker
+let openaiTestBtn = document.getElementById('openaiTestBtn');
+if (openaiTestBtn) {
+  openaiTestBtn.addEventListener('click', function () {
+    let btn = this;
+    let input = document.getElementById('openaiKeyInput');
+    let resultEl = document.getElementById('openaiTestResult');
+    let key = input ? input.value.trim() : '';
+    if (resultEl) {
+      resultEl.textContent = '';
+      resultEl.classList.remove('ok', 'err');
+    }
+    if (!key) {
+      if (resultEl) {
+        resultEl.textContent = 'Enter an API key first.';
+        resultEl.classList.add('err');
+      }
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = 'Testing...';
+    // The first message after a service-worker cold start can be dropped
+    // while it boots — retry once before declaring the extension unreachable.
+    function sendTest(attempt) {
+      chrome.runtime.sendMessage({ action: 'ai:testKey', key: key }, function (response) {
+        let unreachable = chrome.runtime.lastError || !response;
+        if (unreachable && attempt < 2) {
+          setTimeout(function () { sendTest(attempt + 1); }, 700);
+          return;
+        }
+        btn.disabled = false;
+        btn.textContent = 'Test key';
+        if (!resultEl) return;
+        if (unreachable) {
+          let detail = (chrome.runtime.lastError && chrome.runtime.lastError.message) || 'no response';
+          resultEl.textContent = 'Could not reach the extension (' + detail + ') — reload it at chrome://extensions and try again.';
+          resultEl.classList.add('err');
+        } else if (response.ok) {
+          resultEl.textContent = '✓ Key works';
+          resultEl.classList.add('ok');
+        } else {
+          resultEl.textContent = response.error || 'Key check failed.';
+          resultEl.classList.add('err');
+        }
+      });
+    }
+    sendTest(1);
+  });
+}
+
+// AI feature toggles — merge into __0tab_settings.aiFeatures
+document.querySelectorAll('.ai-feature-toggle').forEach(function (el) {
+  el.addEventListener('change', async function () {
+    let key = this.getAttribute('data-feature');
+    let checked = this.checked;
+    try {
+      await saveAiSetting(function (s) {
+        s.aiFeatures = Object.assign({}, AI_FEATURE_DEFAULTS, s.aiFeatures || {});
+        s.aiFeatures[key] = checked;
+      });
+      showToast('Setting saved', 'success');
+    } catch (e) {
+      el.checked = !checked;
+      showToast('Error saving setting.', 'error');
+    }
+  });
+});
+
 // chrome:// links need to be opened via chrome.tabs.create
 document.querySelectorAll('.chrome-link').forEach(function (link) {
   link.addEventListener('click', function (e) {
     e.preventDefault();
     let url = this.getAttribute('data-url');
-    if (url && chrome.tabs && chrome.tabs.create) {
+    if (url && isOpenableUrl(url) && chrome.tabs && chrome.tabs.create) {
       chrome.tabs.create({ url: url });
     }
   });
@@ -1738,11 +1822,9 @@ document.querySelectorAll('.chrome-link').forEach(function (link) {
 document.getElementById('addNewBookmarkBtn').addEventListener('click', function () {
   chrome.runtime.sendMessage({ action: 'getBookmarkFolders' }, function (folders) {
     folders = folders || [];
-    let folderSelectData = folders.map(function (f) {
-      let indent = '';
-      for (let i = 0; i < f.depth; i++) indent += '\u00A0\u00A0';
-      return { value: f.id, label: indent + (f.title || '(Untitled)') };
-    });
+    // includeNoFolder: the save path treats an empty folderId as "no
+    // parent" (bookmark lands in the default location) — keep that choice.
+    let folderSelectData = buildFolderSelectData(folders, true);
 
     let addBmTagsConf = { id: 'tags', tags: [] };
     showModal({
@@ -1750,7 +1832,7 @@ document.getElementById('addNewBookmarkBtn').addEventListener('click', function 
       inputs: [
         { id: 'url', label: 'URL', value: '', placeholder: 'https://example.com' },
         { id: 'bmname', label: 'Bookmark Name', value: '', placeholder: 'e.g. Book Fusion' },
-        { id: 'shortcut', label: '0tab Shortcut (lowercase, no spaces)', value: '', placeholder: 'e.g. bookfusion' },
+        { id: 'shortcut', label: '0tab Shortcut (lowercase, no spaces)', value: '', placeholder: 'e.g. bookfusion', noSpaces: true },
         { id: 'folder', label: 'Bookmark Folder', type: 'select', selectOptions: folderSelectData, value: '' },
         { id: 'tags', label: 'Tags (up to 5, press Enter to add)', type: 'tags' }
       ],
@@ -1824,7 +1906,7 @@ document.getElementById('addNewBookmarkBtn').addEventListener('click', function 
                 return;
               }
               if (shortcutName) {
-                storageGet(null).then(function (all) {
+                dashStorageGetAll().then(function (all) {
                   if (all[shortcutName] && isShortcutKey(shortcutName)) {
                     showToast('Bookmark added! Shortcut "' + shortcutName + '" already exists.', 'info');
                   } else {
@@ -1932,15 +2014,11 @@ async function aiProposeFolderNaming(folderName, allData) {
 
 document.getElementById('addNewFolderBtn').addEventListener('click', async function () {
   // Load all existing data first so we can check for shortcut conflicts
-  let allData = await storageGet(null);
+  let allData = await dashStorageGetAll();
 
   chrome.runtime.sendMessage({ action: 'getBookmarkFolders' }, function (folders) {
     folders = folders || [];
-    let folderSelectData = folders.map(function (f) {
-      let indent = '';
-      for (let i = 0; i < f.depth; i++) indent += '\u00A0\u00A0';
-      return { value: f.id, label: indent + (f.title || '(Untitled)') };
-    });
+    let folderSelectData = buildFolderSelectData(folders, false);
 
     // Default to Bookmarks bar (ID "1" in Chrome)
     let defaultParentId = '1';
@@ -1988,7 +2066,7 @@ document.getElementById('addNewFolderBtn').addEventListener('click', async funct
               if (shortcut && newFolder) {
                 // Compute next pinOrder so this tile lands at the end of
                 // the existing pinned set rather than overlapping.
-                let latestAll = await storageGet(null);
+                let latestAll = await dashStorageGetAll();
                 let maxPinOrder = 0;
                 Object.keys(latestAll).filter(isShortcutKey).forEach(function (k) {
                   let d = latestAll[k];
@@ -2001,6 +2079,7 @@ document.getElementById('addNewFolderBtn').addEventListener('click', async funct
                     type: 'folder',
                     urls: [],
                     folderId: newFolder.id,
+                    bmFolderId: newFolder.id,
                     folderTitle: name,
                     count: 0,
                     tags: ['folder'],
@@ -2075,24 +2154,31 @@ document.getElementById('shortcutFilter').addEventListener('change', function ()
 // ============================================================
 document.getElementById('dashExportBtn').addEventListener('click', async function () {
   try {
-    let items = await storageGet(null);
+    let items = await dashStorageGetAll();
     let keys = Object.keys(items).filter(isShortcutKey);
     if (keys.length === 0) { showToast('No shortcuts to export.', 'error'); return; }
 
     let csvContent = 'shortcut_name,url,count,folder\n';
     keys.forEach(function (key) {
       let data = items[key];
-      let url = typeof data === 'object' ? data.url : data;
-      let count = typeof data === 'object' ? (data.count || 0) : 0;
-      let folder = typeof data === 'object' ? (data.folder || data.category || '') : '';
-      csvContent += key + ',"' + url.replace(/"/g, '""') + '",' + count + ',"' + folder.replace(/"/g, '""') + '"\n';
+      let isFolder = typeof data === 'object' && data !== null && data.type === 'folder';
+      // Folder shortcuts have a urls[] array instead of a single url —
+      // join them so the export never hits undefined.replace().
+      let url = isFolder
+        ? (Array.isArray(data.urls) ? data.urls.join(' | ') : '')
+        : (typeof data === 'object' && data !== null ? (data.url || '') : (data || ''));
+      let count = typeof data === 'object' && data !== null ? (data.count || 0) : 0;
+      let folder = typeof data === 'object' && data !== null
+        ? (data.folder || data.category || data.folderTitle || '')
+        : '';
+      csvContent += key + ',"' + String(url).replace(/"/g, '""') + '",' + count + ',"' + String(folder).replace(/"/g, '""') + '"\n';
     });
 
     let blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     let downloadUrl = URL.createObjectURL(blob);
     let a = document.createElement('a');
     a.href = downloadUrl;
-    a.download = 'tab0-shortcuts.csv';
+    a.download = '0tab-shortcuts.csv';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -2147,16 +2233,32 @@ document.getElementById('dashCsvInput').addEventListener('change', function (eve
         ];
       }
 
-      if (!parts[0] || !parts[1] || parts[0].length > 15 || /\s/.test(parts[0])) { skipped++; continue; }
+      // isShortcutKey also rejects '__0tab_*' names — a crafted CSV row must
+      // not be able to overwrite internal keys (settings, trash, stats).
+      if (!parts[0] || !parts[1] || parts[0].length > 15 || /\s/.test(parts[0]) || !isShortcutKey(parts[0])) { skipped++; continue; }
       shortcuts[parts[0]] = { url: parts[1], count: parts[2], folder: parts[3] };
     }
 
     let count = Object.keys(shortcuts).length;
     if (count === 0) { showToast('No valid shortcuts in CSV.', 'error'); return; }
 
+    // Compute which existing shortcut names would be overwritten
+    let conflicts = [];
+    try {
+      let existing = await dashStorageGetAll();
+      conflicts = Object.keys(shortcuts).filter(function (k) { return isShortcutKey(k) && existing[k]; });
+    } catch (err) { console.warn('0tab: import conflict check failed:', err); }
+
+    let overwriteMsg = ' Existing names will be overwritten.';
+    if (conflicts.length > 0) {
+      let shown = conflicts.slice(0, 8).join(', ');
+      let more = conflicts.length > 8 ? ' and ' + (conflicts.length - 8) + ' more' : '';
+      overwriteMsg = ' ' + conflicts.length + ' existing shortcut(s) will be overwritten: ' + shown + more + '.';
+    }
+
     showModal({
       title: 'Import CSV',
-      body: 'Import ' + count + ' shortcut(s)?' + (skipped > 0 ? ' (' + skipped + ' rows skipped)' : '') + ' Existing names will be overwritten.',
+      body: 'Import ' + count + ' shortcut(s)?' + (skipped > 0 ? ' (' + skipped + ' rows skipped)' : '') + overwriteMsg,
       buttons: [
         { text: 'Cancel', className: 'dm-btn-cancel' },
         {
@@ -2206,11 +2308,28 @@ function countBookmarks(node) {
   return total;
 }
 
+function isFolderShortcutForNode(data, folderNode) {
+  if (!data || typeof data !== 'object' || data.type !== 'folder' || !folderNode) return false;
+  let targetId = String(folderNode.id || '');
+  return String(data.folderId || '') === targetId || String(data.bmFolderId || '') === targetId;
+}
+
+function collectFolderCards(node, parentPath, arr) {
+  if (!node || node.url || node.title === undefined) return;
+  let title = node.title || 'Bookmarks';
+  let displayPath = parentPath ? parentPath + '/' + title : title;
+  node._tab0DisplayPath = displayPath;
+  arr.push(node);
+  if (node.children) {
+    node.children.forEach(function (child) {
+      if (!child.url) collectFolderCards(child, displayPath, arr);
+    });
+  }
+}
+
 async function loadBookmarksView(keepPanels) {
   let grid = document.getElementById('bmGalleryGrid');
   let emptyEl = document.getElementById('bookmarksEmpty');
-  grid.innerHTML = '';
-  emptyEl.classList.add('hidden');
 
   if (!keepPanels) {
     closeFolderDetail();
@@ -2223,24 +2342,24 @@ async function loadBookmarksView(keepPanels) {
     allBookmarkNodes = [];
 
     let roots = tree[0].children || [];
-    let hasContent = false;
+    let folderCards = [];
 
     roots.forEach(function (rootFolder) {
       flattenBookmarks(rootFolder, allBookmarkNodes);
-      if (!rootFolder.children || rootFolder.children.length === 0) return;
-      hasContent = true;
-
-      let card = renderGalleryCard(rootFolder);
-      grid.appendChild(card);
-
-      let subfolders = rootFolder.children.filter(c => !c.url && c.children && c.children.length > 0);
-      subfolders.forEach(function (sub) {
-        let subCard = renderGalleryCard(sub);
-        grid.appendChild(subCard);
-      });
+      collectFolderCards(rootFolder, '', folderCards);
     });
 
-    if (!hasContent) emptyEl.classList.remove('hidden');
+    // Build off-DOM and swap in one shot. Clearing the grid before the
+    // async tree fetch collapsed the page height for a frame, which made
+    // the whole view jump ("shake") on every drag-and-drop re-render.
+    let fragment = document.createDocumentFragment();
+    folderCards.forEach(function (folderNode) {
+      fragment.appendChild(renderGalleryCard(folderNode));
+    });
+    grid.innerHTML = '';
+    grid.appendChild(fragment);
+
+    emptyEl.classList.toggle('hidden', folderCards.length !== 0);
   } catch (err) {
     showToast('Error loading bookmarks: ' + err.message, 'error');
   }
@@ -2334,7 +2453,8 @@ function renderGalleryCard(folderNode) {
   header.appendChild(folderIcon);
   let title = document.createElement('span');
   title.className = 'bm-gallery-title';
-  title.textContent = folderNode.title || 'Bookmarks';
+  title.textContent = folderNode._tab0DisplayPath || folderNode.title || 'Bookmarks';
+  title.title = folderNode._tab0DisplayPath || folderNode.title || 'Bookmarks';
   header.appendChild(title);
   card.appendChild(header);
 
@@ -2435,14 +2555,29 @@ function renderAllPanels() {
   container.classList.remove('hidden');
   currentOpenFolder = openPanels[openPanels.length - 1].folderNode;
 
+  // Preserve each panel's scroll position across the rebuild — a drop used
+  // to snap the list back to the top.
+  let prevScrollTops = [];
+  container.querySelectorAll('.bm-detail-panel').forEach(function (p, i) {
+    let c = p.querySelector('.bm-detail-content');
+    prevScrollTops[i] = c ? c.scrollTop : 0;
+  });
+
   // Build all new panels off-screen first, then swap in one shot to avoid flicker
   let fragment = document.createDocumentFragment();
   openPanels.forEach(function (panelData, panelIndex) {
-    let panel = buildPanelElement(panelData.folderNode, panelIndex);
+    let panel = buildPanelElement(panelData.folderNode, panelIndex, prevScrollTops[panelIndex] || 0);
     fragment.appendChild(panel);
   });
   container.innerHTML = '';
   container.appendChild(fragment);
+
+  // Restore scroll for synchronously-populated panels; async panels restore
+  // again in their row-insert callback once the rows exist.
+  container.querySelectorAll('.bm-detail-panel').forEach(function (p, i) {
+    let c = p.querySelector('.bm-detail-content');
+    if (c && prevScrollTops[i]) c.scrollTop = prevScrollTops[i];
+  });
 
   updatePanelMargin();
 }
@@ -2522,7 +2657,7 @@ async function exportBookmarksFromFolder(folderNode) {
     }
 
     // Also get 0tab shortcut data for each bookmark
-    let allData = await storageGet(null);
+    let allData = await dashStorageGetAll();
     let allKeys = Object.keys(allData).filter(isShortcutKey);
 
     let exportItems = bookmarks.map(function (bm) {
@@ -2556,7 +2691,7 @@ async function exportBookmarksFromFolder(folderNode) {
     let downloadUrl = URL.createObjectURL(blob);
     let a = document.createElement('a');
     a.href = downloadUrl;
-    a.download = 'tab0-' + (folderNode.title || 'bookmarks').toLowerCase().replace(/[^a-z0-9]+/g, '-') + '.json';
+    a.download = '0tab-' + (folderNode.title || 'bookmarks').toLowerCase().replace(/[^a-z0-9]+/g, '-') + '.json';
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -2599,7 +2734,7 @@ function importBookmarksToFolder(folderNode) {
         }
 
         // Check for conflicts: same shortcut name or same URL already in the folder
-        let allData = await storageGet(null);
+        let allData = await dashStorageGetAll();
         let allKeys = Object.keys(allData).filter(isShortcutKey);
         let existingBookmarks = (folderNode.children || []).filter(c => c.url);
 
@@ -2677,7 +2812,7 @@ function showConflictModal(conflicts, clean, folderNode, allData, allKeys) {
 async function doFolderImport(cleanItems, conflictItems, folderNode, mode) {
   // mode: 'replace' = overwrite existing shortcuts, 'keep' = rename shortcut with suffix
   try {
-    let allData = await storageGet(null);
+    let allData = await dashStorageGetAll();
     let allKeys = Object.keys(allData).filter(isShortcutKey);
     let importCount = 0;
 
@@ -2728,7 +2863,7 @@ async function doFolderImport(cleanItems, conflictItems, folderNode, mode) {
           if (existing) {
             await new Promise((resolve) => {
               chrome.bookmarks.remove(existing.id, function () {
-                if (chrome.runtime.lastError) { /* ignore */ }
+                if (chrome.runtime.lastError) { console.warn('0tab: import replace — bookmark remove failed:', chrome.runtime.lastError.message); }
                 resolve();
               });
             });
@@ -2857,7 +2992,7 @@ function renderSubfolderCard(sub, container, parentFolderNode, panelIndex) {
   container.appendChild(subCard);
 }
 
-function buildPanelElement(folderNode, panelIndex) {
+function buildPanelElement(folderNode, panelIndex, restoreScrollTop) {
   let panel = document.createElement('div');
   panel.className = 'bm-detail-panel';
   panel.setAttribute('data-panel-index', panelIndex);
@@ -3032,24 +3167,70 @@ function buildPanelElement(folderNode, panelIndex) {
   let content = document.createElement('div');
   content.className = 'bm-detail-content';
 
+  // Auto-scroll while dragging: native HTML5 drag doesn't scroll inner
+  // overflow containers, so dragging a bookmark toward the panel's top or
+  // bottom edge nudges the list via a rAF loop until the pointer leaves
+  // the edge zone or the drag ends.
+  let autoScrollDir = 0;
+  let autoScrollRaf = null;
+  function autoScrollTick() {
+    if (autoScrollDir !== 0) {
+      content.scrollTop += autoScrollDir;
+      autoScrollRaf = requestAnimationFrame(autoScrollTick);
+    } else {
+      autoScrollRaf = null;
+    }
+  }
+  content.addEventListener('dragover', function (e) {
+    let rect = content.getBoundingClientRect();
+    let zone = 56;
+    let dir = 0;
+    if (e.clientY < rect.top + zone) dir = -Math.ceil((rect.top + zone - e.clientY) / 8);
+    else if (e.clientY > rect.bottom - zone) dir = Math.ceil((e.clientY - (rect.bottom - zone)) / 8);
+    autoScrollDir = dir;
+    if (dir !== 0 && !autoScrollRaf) autoScrollRaf = requestAnimationFrame(autoScrollTick);
+  });
+  ['drop', 'dragend', 'dragleave'].forEach(function (evt) {
+    content.addEventListener(evt, function () { autoScrollDir = 0; });
+  });
+
   if (!folderNode.children || folderNode.children.length === 0) {
     content.innerHTML = '<div class="bm-detail-empty">This folder is empty. Drag bookmarks here to add them.</div>';
     panel.appendChild(content);
     return panel;
   }
 
-  // Render children in their original Chrome bookmark order (folders and bookmarks interleaved)
-  folderNode.children.forEach(function (child) {
-    if (child.url) {
-      // It's a bookmark
-      let row = renderDetailBookmarkItem(child, folderNode);
-      content.appendChild(row);
-    } else if (child.children) {
-      // It's a subfolder — render inline
-      let sub = child;
-      renderSubfolderCard(sub, content, folderNode, panelIndex);
-    }
-  });
+  // Batch-fetch shortcuts for all bookmarks in this folder (avoids N+1 messaging)
+  let bookmarkChildren = folderNode.children.filter(function (c) { return !!c.url; });
+  let bookmarkIds = bookmarkChildren.map(function (c) { return c.id; });
+
+  if (bookmarkIds.length > 0) {
+    chrome.runtime.sendMessage({ action: 'getShortcutsForBookmarks', bookmarkIds: bookmarkIds }, function (shortcutMap) {
+      if (chrome.runtime.lastError) shortcutMap = null;
+      shortcutMap = shortcutMap || {};
+      // Rows arrive async while the dropzone was appended synchronously —
+      // build them in a fragment and insert before it to keep it last.
+      let frag = document.createDocumentFragment();
+      folderNode.children.forEach(function (child) {
+        if (child.url) {
+          let row = renderDetailBookmarkItem(child, folderNode, shortcutMap[child.id] || null);
+          frag.appendChild(row);
+        } else if (child.children) {
+          renderSubfolderCard(child, frag, folderNode, panelIndex);
+        }
+      });
+      content.insertBefore(frag, dropZone);
+      // Rows exist now — re-apply the scroll position preserved across the
+      // rebuild (the sync restore in renderAllPanels ran before rows landed).
+      if (restoreScrollTop) content.scrollTop = restoreScrollTop;
+    });
+  } else {
+    folderNode.children.forEach(function (child) {
+      if (child.children) {
+        renderSubfolderCard(child, content, folderNode, panelIndex);
+      }
+    });
+  }
 
   let dropZone = document.createElement('div');
   dropZone.className = 'bm-detail-dropzone';
@@ -3079,7 +3260,7 @@ function buildPanelElement(folderNode, panelIndex) {
   return panel;
 }
 
-function renderDetailBookmarkItem(bm, parentFolder) {
+function renderDetailBookmarkItem(bm, parentFolder, prefetchedShortcut) {
   let row = document.createElement('div');
   row.className = 'bm-detail-item';
   row.setAttribute('draggable', 'true');
@@ -3158,8 +3339,8 @@ function renderDetailBookmarkItem(bm, parentFolder) {
   tagsRow.className = 'bm-detail-tags';
   tagsRow.style.display = 'none';
 
-  // Look up the linked shortcut for this bookmark
-  chrome.runtime.sendMessage({ action: 'getShortcutForBookmark', bookmarkId: bm.id }, function (response) {
+  // Look up the linked shortcut for this bookmark (use prefetched data if available)
+  function applyShortcutData(response) {
     if (response && response.key) {
       shortcutTag.textContent = response.key;
       shortcutTag.style.display = 'inline-flex';
@@ -3176,7 +3357,13 @@ function renderDetailBookmarkItem(bm, parentFolder) {
         tagsRow.appendChild(pill);
       });
     }
-  });
+  }
+
+  if (prefetchedShortcut !== undefined) {
+    applyShortcutData(prefetchedShortcut);
+  } else {
+    chrome.runtime.sendMessage({ action: 'getShortcutForBookmark', bookmarkId: bm.id }, applyShortcutData);
+  }
 
   let urlText = document.createElement('span');
   urlText.className = 'bm-detail-url';
@@ -3237,18 +3424,14 @@ function editBookmark(bm) {
     chrome.runtime.sendMessage({ action: 'getBookmarkFolders' }, function (folders) {
       folders = folders || [];
 
-      let folderSelectData = folders.map(function (f) {
-        let indent = '';
-        for (let i = 0; i < f.depth; i++) indent += '\u00A0\u00A0';
-        return { value: f.id, label: indent + (f.title || '(Untitled)') };
-      });
+      let folderSelectData = buildFolderSelectData(folders, false);
 
       let editBmTagsConf = { id: 'tags', tags: existingTags.slice() };
       showModal({
         title: 'Edit Bookmark',
         inputs: [
           { id: 'bmname', label: 'Bookmark Name (updates Chrome bookmark)', value: bm.title || '', placeholder: 'e.g. Book Fusion' },
-          { id: 'shortcut', label: '0tab Shortcut (lowercase, no spaces)', value: existingShortcutKey, placeholder: 'e.g. bookfusion or bf' },
+          { id: 'shortcut', label: '0tab Shortcut (lowercase, no spaces)', value: existingShortcutKey, placeholder: 'e.g. bookfusion or bf', noSpaces: true },
           { id: 'url', label: 'URL', value: bm.url || '', placeholder: 'https://example.com' },
           { id: 'folder', label: 'Folder', type: 'select', selectOptions: folderSelectData, value: bm.parentId },
           { id: 'tags', label: 'Tags (up to 5, press Enter to add)', type: 'tags' }
@@ -3276,22 +3459,35 @@ function editBookmark(bm) {
               }
 
               chrome.runtime.sendMessage(updateMsg, async function () {
+                let finishRender = function () {
+                  if (openPanels.length > 0) refreshOpenPanels();
+                  loadBookmarksView(true);
+                  loadShortcutsTable();
+                };
                 // 2. Handle 0tab shortcut rename/create
                 if (newShortcutName) {
                   if (existingShortcutKey && existingShortcutKey !== newShortcutName) {
-                    // Rename shortcut key
+                    // Rename shortcut key. Re-render only once the background
+                    // write has landed — rendering immediately would show the
+                    // old key in the table.
                     chrome.runtime.sendMessage({
                       action: 'updateShortcutKey',
                       oldKey: existingShortcutKey,
                       newKey: newShortcutName,
                       extraData: { url: newUrl, bookmarkId: bm.id, bookmarkTitle: newTitle, tags: tags }
-                    }, function () {
-                      showToast('Bookmark & shortcut updated!', 'success');
+                    }, function (res) {
+                      if (res && res.success) {
+                        showToast('Bookmark & shortcut updated!', 'success');
+                      } else {
+                        showToast('Bookmark updated; shortcut rename failed: ' + ((res && res.error) || 'unknown error'), 'error');
+                      }
+                      finishRender();
                     });
+                    return;
                   } else if (!existingShortcutKey) {
                     // Create new shortcut
                     try {
-                      let all = await storageGet(null);
+                      let all = await dashStorageGetAll();
                       if (all[newShortcutName] && isShortcutKey(newShortcutName)) {
                         showToast(newShortcutName + ' already exists as a shortcut!', 'error');
                       } else {
@@ -3302,10 +3498,11 @@ function editBookmark(bm) {
                       showToast('Error: ' + err.message, 'error');
                     }
                   } else {
-                    // Same key, just update data
+                    // Same key, just update data. Copy before mutating — the
+                    // object belongs to the shared dashStorageGetAll cache.
                     try {
-                      let all = await storageGet(null);
-                      let existing = all[existingShortcutKey] || {};
+                      let all = await dashStorageGetAll();
+                      let existing = Object.assign({}, all[existingShortcutKey] || {});
                       existing.url = newUrl;
                       existing.bookmarkTitle = newTitle;
                       existing.tags = tags;
@@ -3319,9 +3516,7 @@ function editBookmark(bm) {
                   showToast('Bookmark updated!', 'success');
                 }
 
-                if (openPanels.length > 0) refreshOpenPanels();
-                loadBookmarksView(true);
-                loadShortcutsTable();
+                finishRender();
               });
             }
           }
@@ -3459,7 +3654,9 @@ function init() {
 
   // If opened because a shortcut was not found in omnibox
   if (params.get('notfound')) {
-    let missed = decodeURIComponent(params.get('notfound'));
+    // params.get already decodes — a second decodeURIComponent throws
+    // URIError on keywords containing '%' and kills the whole dialog.
+    let missed = params.get('notfound');
     // Switch to shortcuts subtab
     document.querySelectorAll('.nav-item').forEach(b => b.classList.remove('active'));
     document.querySelector('[data-view="bookmarks"]').classList.add('active');
@@ -3470,13 +3667,106 @@ function init() {
     document.querySelectorAll('.subtab').forEach(s => s.classList.remove('active'));
     document.getElementById('subtab-bm-shortcuts').classList.add('active');
     loadShortcutsTable();
-    // Show a modal prompting the user to create the shortcut
-    setTimeout(() => {
+    // Show a modal with near-miss suggestions, a web-search escape hatch,
+    // and the option to create the missing shortcut.
+    setTimeout(async () => {
+      let suggestions = [];
+      try {
+        let all = await dashStorageGetAll();
+        suggestions = findShortcutSuggestions(missed, all);
+      } catch (e) {}
+      let runNotFoundSearch = function () {
+        let inp = document.getElementById('dm-input-websearch');
+        let q = ((inp && inp.value) || missed).trim();
+        if (!q) return;
+        try {
+          if (chrome.search && chrome.search.query) {
+            chrome.search.query({ text: q, disposition: 'NEW_TAB' });
+            return;
+          }
+        } catch (e) {}
+        chrome.tabs.create({ url: 'https://www.google.com/search?q=' + encodeURIComponent(q) });
+      };
       showModal({
         title: 'Shortcut not found',
-        body: 'No shortcut found for "' + missed + '". Would you like to create it?',
+        body: 'No shortcut found for "' + missed + '".',
+        inputs: [
+          { id: 'websearch', label: 'Or search the web', value: missed, placeholder: 'Search the web...' }
+        ],
+        afterRender: function () {
+          // Two-column action layout: Create Shortcut | Search Web on the
+          // first row, Cancel | Quick Jump below.
+          let actionsGridEl = document.getElementById('dashModalActions');
+          if (actionsGridEl) actionsGridEl.classList.add('modal-actions-grid');
+          let searchInp = document.getElementById('dm-input-websearch');
+          if (searchInp) {
+            // Inline "go" arrow inside the search field
+            let wrap = document.createElement('div');
+            wrap.className = 'nf-search-wrap';
+            searchInp.parentNode.insertBefore(wrap, searchInp);
+            wrap.appendChild(searchInp);
+            let goBtn = document.createElement('button');
+            goBtn.className = 'nf-search-go';
+            goBtn.title = 'Search the web';
+            goBtn.setAttribute('aria-label', 'Search the web');
+            goBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>';
+            goBtn.addEventListener('click', function () {
+              hideModal();
+              runNotFoundSearch();
+            });
+            wrap.appendChild(goBtn);
+            // Moving the input into the wrapper blurred it (showModal had
+            // focused it 10ms earlier) — refocus with the caret at the end
+            // so typing and Enter/Escape work immediately.
+            searchInp.focus();
+            try { searchInp.setSelectionRange(searchInp.value.length, searchInp.value.length); } catch (e) {}
+            searchInp.addEventListener('keydown', function (e) {
+              if (e.isComposing || e.keyCode === 229) return;
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                hideModal();
+                runNotFoundSearch();
+              }
+            });
+          }
+          if (suggestions.length === 0) return;
+          let inputsEl = document.getElementById('dashModalInputs');
+          if (!inputsEl) return;
+          let block = document.createElement('div');
+          block.className = 'nf-suggestions';
+          let head = document.createElement('div');
+          head.className = 'nf-suggestions-head';
+          head.textContent = 'Did you mean:';
+          block.appendChild(head);
+          suggestions.forEach(function (s) {
+            let row = document.createElement('div');
+            row.className = 'nf-suggestion';
+            row.setAttribute('role', 'button');
+            row.tabIndex = 0;
+            row.title = 'Open ' + s.url;
+            row.appendChild(createFaviconEl(s.url, s.key, 'nf-suggestion-fav', 16));
+            let nameEl = document.createElement('span');
+            nameEl.className = 'nf-suggestion-name';
+            nameEl.textContent = s.key;
+            row.appendChild(nameEl);
+            let urlEl = document.createElement('span');
+            urlEl.className = 'nf-suggestion-url';
+            urlEl.textContent = s.url.length > 42 ? s.url.substring(0, 42) + '…' : s.url;
+            row.appendChild(urlEl);
+            let openSuggestion = function () {
+              if (!isOpenableUrl(s.url)) { showToast('Blocked unsafe URL.', 'error'); return; }
+              chrome.tabs.create({ url: s.url });
+              hideModal();
+            };
+            row.addEventListener('click', openSuggestion);
+            row.addEventListener('keydown', function (e) {
+              if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openSuggestion(); }
+            });
+            block.appendChild(row);
+          });
+          inputsEl.insertBefore(block, inputsEl.firstChild);
+        },
         buttons: [
-          { text: 'Cancel', className: 'dm-btn-cancel' },
           {
             text: 'Create Shortcut', className: 'dm-btn-save', onClick: function () {
               // Open the add shortcut modal with the name pre-filled
@@ -3485,18 +3775,11 @@ function init() {
               // Load folders for the folder dropdown
               chrome.runtime.sendMessage({ action: 'getBookmarkFolders' }, function (folders) {
                 if (chrome.runtime.lastError) folders = [];
-                folders = folders || [];
-                let folderSelectData = [{ value: '', label: 'No folder' }].concat(
-                  folders.map(function (f) {
-                    let indent = '';
-                    for (let i = 0; i < f.depth; i++) indent += '\u00A0\u00A0';
-                    return { value: f.id, label: indent + (f.title || '(Untitled)') };
-                  })
-                );
+                let folderSelectData = buildFolderSelectData(folders, true);
                 showModal({
                   title: 'New Shortcut',
                   inputs: [
-                    { id: 'name', label: 'Shortcut name (max 15 chars, no spaces)', value: missed, placeholder: 'e.g. yt' },
+                    { id: 'name', label: 'Shortcut name (max 15 chars, no spaces)', value: missed, placeholder: 'e.g. yt', noSpaces: true },
                     { id: 'url', label: 'URL', value: '', placeholder: 'https://example.com' },
                     { id: 'tags', label: 'Tags (optional, up to 5, press Enter to add)', type: 'tags' },
                     { id: 'folder', label: 'Folder', type: 'select', selectOptions: folderSelectData, value: '' }
@@ -3516,7 +3799,7 @@ function init() {
                         if (/\s/.test(name)) { showToast('No spaces in name.', 'error'); return; }
                         if (!url || !isSaveableUrl(url)) { showToast('Valid URL required.', 'error'); return; }
                         try {
-                          let all = await storageGet(null);
+                          let all = await dashStorageGetAll();
                           if (all[name] && isShortcutKey(name)) { showToast(name + ' already exists!', 'error'); return; }
                           // Default to 0tab Shortcuts folder if none selected
                           if (!folderId) {
@@ -3554,6 +3837,13 @@ function init() {
                 });
               });
             }
+          },
+          { text: 'Search Web', className: 'dm-btn-outline', onClick: runNotFoundSearch },
+          { text: 'Cancel', className: 'dm-btn-cancel' },
+          {
+            text: 'Quick Jump', className: 'dm-btn-outline', onClick: function () {
+              if (typeof window.openSpotlight === 'function') window.openSpotlight(missed);
+            }
           }
         ]
       });
@@ -3576,14 +3866,14 @@ async function populateFolderShortcutBar(folderNode, panelIndex) {
   bar.innerHTML = '';
 
   try {
-    let allData = await storageGet(null);
+    let allData = await dashStorageGetAll();
     let existingKey = null;
 
     // Find existing folder-type shortcut matching this folder's ID
     for (let key in allData) {
       if (key.startsWith('__')) continue;
       let d = allData[key];
-      if (d && typeof d === 'object' && d.type === 'folder' && d.folderId === folderNode.id) {
+      if (isFolderShortcutForNode(d, folderNode)) {
         existingKey = key;
         break;
       }
@@ -3611,7 +3901,7 @@ async function populateFolderShortcutBar(folderNode, panelIndex) {
           if (node.children) node.children.forEach(collectUrls);
         }
         if (subtree[0]) collectUrls(subtree[0]);
-      } catch (e) { /* ignore */ }
+      } catch (e) { console.warn('0tab: collecting folder URLs failed:', e); }
 
       if (urls.length > 0) {
         // Auto-save the folder shortcut
@@ -3620,6 +3910,7 @@ async function populateFolderShortcutBar(folderNode, panelIndex) {
             type: 'folder',
             urls: urls,
             folderId: folderNode.id,
+            bmFolderId: folderNode.id,
             folderTitle: folderNode.title || candidate,
             count: 0,
             tags: ['folder'],
@@ -3646,11 +3937,11 @@ async function populateFolderShortcutBadge(folderNode, panelIndex) {
   let badge = document.getElementById('folderShortcutBadge-' + panelIndex);
   if (!badge) return;
   try {
-    let allData = await storageGet(null);
+    let allData = await dashStorageGetAll();
     for (let key in allData) {
       if (key.startsWith('__')) continue;
       let d = allData[key];
-      if (d && typeof d === 'object' && d.type === 'folder' && d.folderId === folderNode.id) {
+      if (isFolderShortcutForNode(d, folderNode)) {
         badge.textContent = key;
         badge.title = 'Shortcut: 0+Tab → ' + key;
         return;
@@ -3685,11 +3976,11 @@ function confirmDeleteFolder(folderNode, panelIndex) {
             // Await the remove so the success toast reflects reality.
             (async function () {
               try {
-                let allData = await storageGet(null);
+                let allData = await dashStorageGetAll();
                 for (let key in allData) {
                   if (key.startsWith('__')) continue;
                   let d = allData[key];
-                  if (d && typeof d === 'object' && d.type === 'folder' && d.folderId === folderNode.id) {
+                  if (isFolderShortcutForNode(d, folderNode)) {
                     await addToTrashManage(key, d);
                     await storageRemove(key);
                     break;
@@ -3721,7 +4012,7 @@ document.addEventListener('click', function () {
  * Opens a modal to edit the folder name and its associated shortcut.
  */
 async function openFolderEditModal(folderNode, panelIndex) {
-  let allData = await storageGet(null);
+  let allData = await dashStorageGetAll();
   let existingKey = null;
 
   // Find existing folder-type shortcut for this folder
@@ -3730,7 +4021,7 @@ async function openFolderEditModal(folderNode, panelIndex) {
     let d = allData[key];
     if (d && typeof d === 'object') {
       // Match by folderId or by folder name
-      if ((d.type === 'folder' && d.folderId === folderNode.id) ||
+      if (isFolderShortcutForNode(d, folderNode) ||
           (d.folder && d.folder === folderNode.title && !d.url)) {
         existingKey = key;
         break;
@@ -3843,6 +4134,7 @@ async function openFolderEditModal(folderNode, panelIndex) {
                   type: 'folder',
                   urls: urls,
                   folderId: folderNode.id,
+                  bmFolderId: folderNode.id,
                   folderTitle: newName,
                   count: (existingKey && allData[existingKey]) ? (allData[existingKey].count || 0) : 0,
                   tags: ['folder'],
@@ -3930,7 +4222,7 @@ async function homeRenderGreeting() {
   if (!main || !sub) return;
   let name = await homeFetchUserName();
   main.textContent = homeGreetingText() + (name ? ', ' + name.split(' ')[0] : '') + '.';
-  let items = await storageGet(null);
+  let items = await dashStorageGetAll();
   let shortcuts = Object.keys(items).filter(isShortcutKey);
   let totalOpens = 0;
   let openedToday = 0;
@@ -3960,7 +4252,7 @@ async function homeRenderDock() {
   let grid = document.getElementById('homeDockGrid');
   let sub = document.getElementById('homeDockSub');
   if (!grid) return;
-  let items = await storageGet(null);
+  let items = await dashStorageGetAll();
   let rows = Object.keys(items).filter(isShortcutKey).map(function (k) {
     let d = items[k]; if (typeof d === 'string') d = { url: d, count: 0 };
     return { key: k, data: d || {} };
@@ -4002,20 +4294,21 @@ async function homeRenderDock() {
       ? ((r.data.urls ? r.data.urls.length : 0) + ' tabs')
       : ((r.data.count || 0) + ' open' + ((r.data.count || 0) === 1 ? '' : 's'));
     let pinnedBadge = r.data.pinned === true
-      ? '<span class="home-dock-tile-pin" title="Pinned"><svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M14 4l6 6-3 3-2-2-3 3v6l-2 2v-7l-5-5 2-2 3-3-2-2 6-2z"/></svg></span>'
+      ? '<span class="home-dock-tile-pin" title="Pinned"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z" fill="currentColor"/></svg></span>'
       : '';
     tile.innerHTML = pinnedBadge + fav +
-      '<div class="home-dock-tile-name">' + tab0EscapeHtml(r.key) + '</div>' +
+      '<div class="home-dock-tile-name">' + escapeHtml(r.key) + '</div>' +
       '<div class="home-dock-tile-meta">' + meta + '</div>';
     tile.addEventListener('click', function (ev) {
       if (isFolder) {
         // Navigate to Library and open the folder's bookmark panel.
-        navigateToLibraryAndOpenFolder(r.data.folderId, r.data.folderTitle || r.key);
+        navigateToLibraryAndOpenFolder(r.data.folderId || r.data.bmFolderId, r.data.folderTitle || r.key);
         return;
       }
       if (r.data.url) {
         // Default: open in a new tab so the dashboard stays open.
         // Cmd/Ctrl+click replaces the current tab.
+        if (!isOpenableUrl(r.data.url)) return;
         if (ev.metaKey || ev.ctrlKey) chrome.tabs.update({ url: r.data.url });
         else chrome.tabs.create({ url: r.data.url });
       }
@@ -4091,7 +4384,7 @@ async function navigateToLibraryAndOpenFolder(folderId, fallbackTitle) {
 async function homeRenderSuggestions() {
   let host = document.getElementById('homeSuggestionCards');
   if (!host) return;
-  let items = await storageGet(null);
+  let items = await dashStorageGetAll();
   let shortcuts = Object.keys(items).filter(isShortcutKey).map(function (k) {
     let d = items[k]; if (typeof d === 'string') d = { url: d, count: 0 };
     return Object.assign({ name: k }, d || {});
@@ -4173,8 +4466,8 @@ async function homeRenderSuggestions() {
     card.className = 'home-suggestion-card';
     card.innerHTML =
       '<div class="home-suggestion-card-icon">' + s.icon + '</div>' +
-      '<h4 class="home-suggestion-card-title">' + tab0EscapeHtml(s.title) + '</h4>' +
-      '<p class="home-suggestion-card-desc">' + tab0EscapeHtml(s.desc) + '</p>' +
+      '<h4 class="home-suggestion-card-title">' + escapeHtml(s.title) + '</h4>' +
+      '<p class="home-suggestion-card-desc">' + escapeHtml(s.desc) + '</p>' +
       '<div class="home-suggestion-card-actions"></div>';
     let actions = card.querySelector('.home-suggestion-card-actions');
     let btn = document.createElement('button');
@@ -4199,7 +4492,7 @@ function openAskChatWith(query) {
 async function homeRenderRecent() {
   let host = document.getElementById('homeRecentList');
   if (!host) return;
-  let items = await storageGet(null);
+  let items = await dashStorageGetAll();
   let rows = Object.keys(items).filter(isShortcutKey).map(function (k) {
     let d = items[k]; if (typeof d === 'string') d = { url: d, count: 0 };
     return Object.assign({ name: k }, d || {});
@@ -4219,11 +4512,12 @@ async function homeRenderRecent() {
     el.innerHTML =
       '<img class="home-recent-row-fav" src="' + fav + '" data-hide-on-error="visibility">' +
       '<div class="home-recent-row-main">' +
-        '<div class="home-recent-row-name">' + tab0EscapeHtml(r.name) + '</div>' +
+        '<div class="home-recent-row-name">' + escapeHtml(r.name) + '</div>' +
         '<div class="home-recent-row-meta">' + ago + ' · ' + (r.count || 0) + ' opens</div>' +
       '</div>';
     el.addEventListener('click', function (ev) {
       // Default: new tab. Cmd/Ctrl+click replaces the current tab.
+      if (!isOpenableUrl(r.url)) return;
       if (ev.metaKey || ev.ctrlKey) chrome.tabs.update({ url: r.url });
       else chrome.tabs.create({ url: r.url });
     });
@@ -4274,7 +4568,7 @@ async function homeRenderFolders() {
     el.innerHTML =
       '<span class="home-folder-row-icon"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></span>' +
       '<div class="home-folder-row-main">' +
-        '<div class="home-folder-row-name">' + tab0EscapeHtml(f.title) + '</div>' +
+        '<div class="home-folder-row-name">' + escapeHtml(f.title) + '</div>' +
         '<div class="home-folder-row-meta">' + f.count + ' bookmark' + (f.count !== 1 ? 's' : '') + '</div>' +
       '</div>';
     el.addEventListener('click', function () {
@@ -4300,7 +4594,7 @@ async function renderHomeView() {
       homeRenderRecent(),
       homeRenderFolders()
     ]);
-  } catch (e) { /* silent */ }
+  } catch (e) { console.warn('0tab: renderHomeView failed:', e); }
 }
 
 (function wireHomeView() {
@@ -4363,9 +4657,11 @@ if (_dashReconcileBtn) {
       }
       let sc = res.shortcutsCreated || 0;
       let bm = res.bookmarksCreated || 0;
-      let msg = sc === 0 && bm === 0
-        ? 'Everything is already in sync.'
-        : 'Created ' + sc + ' shortcut' + (sc === 1 ? '' : 's') + ' and ' + bm + ' bookmark' + (bm === 1 ? '' : 's') + '.';
+      let msg = res.queued
+        ? 'A sync is already running — your request will follow it shortly.'
+        : sc === 0 && bm === 0
+          ? 'Everything is already in sync.'
+          : 'Created ' + sc + ' shortcut' + (sc === 1 ? '' : 's') + ' and ' + bm + ' bookmark' + (bm === 1 ? '' : 's') + '.';
       if (resultEl) {
         resultEl.classList.remove('hidden');
         resultEl.textContent = msg;
@@ -4445,7 +4741,7 @@ function tab0SuggestShortcutName(title, url, taken) {
 async function tab0GatherHistoryCandidates(maxResults) {
   // Ask Chrome for visits in the last 90 days
   if (!chrome.history || !chrome.history.search) return [];
-  let items = await storageGet(null);
+  let items = await dashStorageGetAll();
   let takenKeys = {};
   let savedUrls = {};
   Object.keys(items).filter(isShortcutKey).forEach(function (k) {
@@ -4515,11 +4811,6 @@ async function tab0GatherHistoryCandidates(maxResults) {
   return candidates;
 }
 
-function tab0EscapeHtml(s) {
-  return (s || '').replace(/[<>&"']/g, function (c) {
-    return { '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;', "'": '&#39;' }[c];
-  });
-}
 
 async function openHistoryImportModal(options) {
   options = options || {};
@@ -4585,10 +4876,10 @@ async function openHistoryImportModal(options) {
       '<input type="checkbox" checked>' +
       (fav ? '<img class="history-import-row-fav" src="' + fav + '" data-hide-on-error="visibility">' : '<span class="history-import-row-fav"></span>') +
       '<div class="history-import-row-main">' +
-        '<span class="history-import-row-title">' + tab0EscapeHtml(c.title) + '</span>' +
-        '<span class="history-import-row-url">' + tab0EscapeHtml(c.url) + '</span>' +
+        '<span class="history-import-row-title">' + escapeHtml(c.title) + '</span>' +
+        '<span class="history-import-row-url">' + escapeHtml(c.url) + '</span>' +
       '</div>' +
-      '<input type="text" class="history-import-row-name" maxlength="15" value="' + tab0EscapeHtml(c.suggestedName) + '" spellcheck="false" title="0tab shortcut name (editable)">' +
+      '<input type="text" class="history-import-row-name" maxlength="15" value="' + escapeHtml(c.suggestedName) + '" spellcheck="false" title="0tab shortcut name (editable)">' +
       '<span class="history-import-row-count">' + c.visitCount + '×</span>';
     listEl.appendChild(row);
 
@@ -4622,7 +4913,7 @@ async function openHistoryImportModal(options) {
     let skipped = 0;
     let rows = listEl.querySelectorAll('.history-import-row');
     // Fetch fresh "taken" set so we never collide
-    let latest = await storageGet(null);
+    let latest = await dashStorageGetAll();
     let taken = {};
     Object.keys(latest).filter(isShortcutKey).forEach(function (k) { taken[k] = 1; });
     // Find/create 0tab folder once
@@ -4708,7 +4999,7 @@ async function maybeTriggerHistoryImport() {
     if (all && (all[HISTORY_IMPORT_FLAG] || all[HISTORY_IMPORT_DISMISSED_FLAG])) return;
     // Only prompt if the history permission is present AND user is light on shortcuts
     if (!chrome.history || !chrome.history.search) return;
-    let items = await storageGet(null);
+    let items = await dashStorageGetAll();
     let shortcutCount = Object.keys(items).filter(isShortcutKey).length;
     if (shortcutCount > 8) {
       // Established user — skip auto-prompt; still re-openable from Settings.
@@ -4722,7 +5013,7 @@ async function maybeTriggerHistoryImport() {
     if (!preview || preview.length < HISTORY_IMPORT_MIN_SUGGESTIONS) return;
     // Slight delay so dashboard paint finishes first
     setTimeout(function () { openHistoryImportModal(); }, 800);
-  } catch (e) { /* silent */ }
+  } catch (e) { console.warn('0tab: history import auto-prompt failed:', e); }
 }
 
 // ============================================================
@@ -4730,7 +5021,7 @@ async function maybeTriggerHistoryImport() {
 // ============================================================
 async function refreshTopUtilityStats() {
   try {
-    let items = await storageGet(null);
+    let items = await dashStorageGetAll();
     let shortcutKeys = Object.keys(items).filter(isShortcutKey);
     let bookmarkCount = 0;
     let folderCount = 0;
@@ -4753,7 +5044,7 @@ async function refreshTopUtilityStats() {
     setStat('bookmarks', bookmarkCount);
     setStat('shortcuts', shortcutKeys.length);
     setStat('folders', folderCount);
-  } catch (e) { /* silent */ }
+  } catch (e) { console.warn('0tab: refreshTopUtilityStats failed:', e); }
 }
 
 (function wireTopUtilityBar() {
@@ -4814,7 +5105,7 @@ async function refreshTopUtilityStats() {
   let cacheStamp = 0;
   async function buildIndex() {
     if (cachedIndex && Date.now() - cacheStamp < 30 * 1000) return cachedIndex;
-    let items = await storageGet(null);
+    let items = await dashStorageGetAll();
     let shortcuts = Object.keys(items).filter(isShortcutKey).map(function (k) {
       let d = items[k] || {};
       return {
@@ -4965,20 +5256,23 @@ async function refreshTopUtilityStats() {
       });
       return;
     }
-    if (!url) return;
+    if (!url || !isOpenableUrl(url)) return;
     // Default behavior from spotlight (Enter) = new tab, so the dashboard
     // stays open. Cmd/Ctrl+Enter (forceNewTab) replaces the current tab.
     if (forceNewTab) chrome.tabs.update({ url: url });
     else chrome.tabs.create({ url: url });
   }
 
-  function openSpotlight() {
+  function openSpotlight(prefill) {
     overlay.classList.remove('hidden');
-    input.value = '';
+    input.value = prefill || '';
     currentResults = [];
     activeIndex = 0;
     resultsEl.innerHTML = '';
-    setTimeout(function () { input.focus(); }, 30);
+    setTimeout(function () {
+      input.focus();
+      if (prefill) input.dispatchEvent(new Event('input', { bubbles: true }));
+    }, 30);
   }
   function closeSpotlight() {
     overlay.classList.add('hidden');

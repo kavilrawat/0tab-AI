@@ -2,12 +2,6 @@
 // 0TAB - Popup Script (Redesigned with theme + bookmark fields)
 // ============================================================
 
-const INTERNAL_KEYS = ['__0tab_folders', '__0tab_settings', '__0tab_migrated_v1', '__0tab_migrated_v2', '__0tab_daily_stats', '__0tab_trash'];
-function isShortcutKey(key) {
-  if (!key || typeof key !== 'string') return false;
-  if (key.startsWith('__')) return false;
-  return !INTERNAL_KEYS.includes(key);
-}
 
 // --- AI helpers (talk to background service worker) ---
 let aiEnabled = null; // cached status
@@ -76,141 +70,6 @@ async function aiGenerateDescription(title, url) {
     });
     return response.description;
   } catch (e) { return null; }
-}
-
-// --- Storage helpers ---
-// Storage moved from chrome.storage.sync to chrome.storage.local to avoid
-// the 102KB/8KB-per-item/120-writes-per-minute sync quotas that were
-// silently dropping saves. Existing sync data is migrated once below.
-let __0tabMigrationPromise = null;
-function __0tabEnsureMigrated() {
-  if (__0tabMigrationPromise) return __0tabMigrationPromise;
-  __0tabMigrationPromise = new Promise(function (resolve) {
-    try {
-      chrome.storage.local.get('__0tab_migrated_v1', function (flagRes) {
-        if (chrome.runtime.lastError || (flagRes && flagRes.__0tab_migrated_v1)) {
-          resolve(); return;
-        }
-        chrome.storage.sync.get(null, function (syncData) {
-          if (chrome.runtime.lastError || !syncData || Object.keys(syncData).length === 0) {
-            chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-            return;
-          }
-          chrome.storage.local.get(null, function (localData) {
-            let toCopy = {};
-            Object.keys(syncData).forEach(function (k) {
-              if (!(k in localData)) toCopy[k] = syncData[k];
-            });
-            if (Object.keys(toCopy).length === 0) {
-              chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-              return;
-            }
-            chrome.storage.local.set(toCopy, function () {
-              chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-            });
-          });
-        });
-      });
-    } catch (e) { resolve(); }
-  });
-  return __0tabMigrationPromise;
-}
-__0tabEnsureMigrated();
-
-// v2 migration: rebrand from Tab0 AI → 0tab AI. Renames legacy `__ssg_*` /
-// `__tab0_*` storage keys to `__0tab_*`. Idempotent, gated on flag.
-const __0TAB_KEY_RENAME_MAP = {
-  '__ssg_folders': '__0tab_folders',
-  '__ssg_settings': '__0tab_settings',
-  '__ssg_trash': '__0tab_trash',
-  '__tab0_migrated_v1': '__0tab_migrated_v1',
-  '__tab0_daily_stats': '__0tab_daily_stats',
-  '__tab0_history_imported_v1': '__0tab_history_imported_v1',
-  '__tab0_history_dismissed_v1': '__0tab_history_dismissed_v1'
-};
-let __0tabMigrationV2Promise = null;
-function __0tabEnsureMigratedV2() {
-  if (__0tabMigrationV2Promise) return __0tabMigrationV2Promise;
-  __0tabMigrationV2Promise = __0tabEnsureMigrated().then(function () {
-    return new Promise(function (resolve) {
-      try {
-        chrome.storage.local.get('__0tab_migrated_v2', function (flagRes) {
-          if (chrome.runtime.lastError || (flagRes && flagRes.__0tab_migrated_v2)) {
-            resolve(); return;
-          }
-          chrome.storage.local.get(null, function (all) {
-            if (chrome.runtime.lastError) { resolve(); return; }
-            all = all || {};
-            let writes = {};
-            let removes = [];
-            Object.keys(__0TAB_KEY_RENAME_MAP).forEach(function (oldK) {
-              let newK = __0TAB_KEY_RENAME_MAP[oldK];
-              if (oldK in all) {
-                if (!(newK in all)) writes[newK] = all[oldK];
-                removes.push(oldK);
-              }
-            });
-            // Order: writes → removes → flag. Set migrated_v2 ONLY after
-            // both succeeded without lastError; if either fails we resolve
-            // without flagging so the next load retries.
-            function finish() {
-              chrome.storage.local.set({ '__0tab_migrated_v2': true }, function () { resolve(); });
-            }
-            function doRemove() {
-              if (removes.length === 0) { finish(); return; }
-              chrome.storage.local.remove(removes, function () {
-                if (chrome.runtime.lastError) { resolve(); return; }
-                finish();
-              });
-            }
-            if (Object.keys(writes).length === 0) {
-              doRemove();
-            } else {
-              chrome.storage.local.set(writes, function () {
-                if (chrome.runtime.lastError) { resolve(); return; }
-                doRemove();
-              });
-            }
-          });
-        });
-      } catch (e) { resolve(); }
-    });
-  });
-  return __0tabMigrationV2Promise;
-}
-__0tabEnsureMigratedV2();
-
-function storageGet(keys) {
-  return __0tabEnsureMigratedV2().then(function () {
-    return new Promise(function (resolve, reject) {
-      chrome.storage.local.get(keys, function (r) {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve(r);
-      });
-    });
-  });
-}
-
-function storageSet(data) {
-  return __0tabEnsureMigratedV2().then(function () {
-    return new Promise(function (resolve, reject) {
-      chrome.storage.local.set(data, function () {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve();
-      });
-    });
-  });
-}
-
-function storageRemove(keys) {
-  return __0tabEnsureMigratedV2().then(function () {
-    return new Promise(function (resolve, reject) {
-      chrome.storage.local.remove(keys, function () {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve();
-      });
-    });
-  });
 }
 
 // --- All-items cache (read-only) ---
@@ -306,16 +165,37 @@ let _activeTabPromise = new Promise(function (resolve) {
 });
 
 // --- Toast ---
-function showToast(message, type) {
+// opts (optional): { actionText, onAction, duration } — renders a clickable
+// action button (e.g. Undo) and keeps the toast up for `duration` ms.
+let _toastTimers = [];
+function showToast(message, type, opts) {
   type = type || 'info';
   let toast = document.getElementById('toast');
+  _toastTimers.forEach(clearTimeout);
+  _toastTimers = [];
   toast.textContent = message;
   toast.className = 'toast toast-' + type;
-  setTimeout(() => toast.classList.add('toast-visible'), 10);
-  setTimeout(() => {
+  if (opts && opts.actionText && typeof opts.onAction === 'function') {
+    let btn = document.createElement('button');
+    btn.className = 'toast-action';
+    btn.textContent = opts.actionText;
+    btn.addEventListener('click', function () {
+      _toastTimers.forEach(clearTimeout);
+      _toastTimers = [];
+      toast.classList.remove('toast-visible');
+      // Tracked, so a toast shown by onAction (e.g. "Restored") can cancel it
+      _toastTimers.push(setTimeout(() => toast.className = 'toast hidden', 300));
+      opts.onAction();
+    });
+    toast.appendChild(btn);
+    toast.classList.add('toast-has-action');
+  }
+  let duration = (opts && opts.duration) || 2500;
+  _toastTimers.push(setTimeout(() => toast.classList.add('toast-visible'), 10));
+  _toastTimers.push(setTimeout(() => {
     toast.classList.remove('toast-visible');
-    setTimeout(() => toast.className = 'toast hidden', 300);
-  }, 2500);
+    _toastTimers.push(setTimeout(() => toast.className = 'toast hidden', 300));
+  }, duration));
 }
 
 // --- Modal ---
@@ -357,6 +237,7 @@ function showModal(options) {
         input.value = inp.value || '';
         input.placeholder = inp.placeholder || '';
         input.className = 'modal-input';
+        if (inp.noSpaces) enforceShortcutNameInput(input);
       }
 
       inputsEl.appendChild(label);
@@ -385,7 +266,13 @@ function showModal(options) {
   }
 
   overlay.classList.remove('hidden');
-  let firstInput = inputsEl.querySelector('input, select');
+  // Move focus into the dialog even when it has no inputs (button-only
+  // confirms) — otherwise the overlay's Escape/Tab-trap keydown never fires.
+  // Prefer the cancel-style button so Enter can never trigger a destructive
+  // default the user didn't aim at.
+  let firstInput = inputsEl.querySelector('input, select')
+    || actionsEl.querySelector('.modal-btn-cancel')
+    || actionsEl.querySelector('button');
   if (firstInput) setTimeout(() => firstInput.focus(), 50);
 }
 
@@ -403,169 +290,59 @@ document.getElementById('modalOverlay').addEventListener('click', function (e) {
   hideModal();
 });
 
-// --- URL validation ---
-function isValidUrl(str) {
-  try {
-    let url = new URL(str);
-    return url.protocol === 'http:' || url.protocol === 'https:';
-  } catch (e) {
-    return false;
+document.getElementById('modalOverlay').addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') {
+    // Mirror the overlay-click path: click the cancel button if present so
+    // any awaiting confirmation flow resolves instead of hanging.
+    let actions = document.getElementById('modalActions');
+    let cancelBtn = actions && (actions.querySelector('.modal-btn-cancel') || actions.querySelector('button'));
+    if (cancelBtn) { cancelBtn.click(); } else { hideModal(); }
+    return;
   }
-}
-
-// Broader check: anything that can be bookmarked (http, https, chrome-extension, file, ftp, etc.)
-function isSaveableUrl(str) {
-  if (!str) return false;
-  // Block truly unsaveable pages
-  let blocked = ['about:blank', 'about:newtab', 'chrome://newtab/', 'chrome://new-tab-page/'];
-  if (blocked.includes(str)) return false;
-  try {
-    new URL(str);
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-// --- Debounce ---
-function debounce(fn, delay) {
-  let timer;
-  return function () { clearTimeout(timer); timer = setTimeout(fn, delay); };
-}
-
-// --- Get favicon URL ---
-function getFaviconUrl(url) {
-  try {
-    let domain = new URL(url).hostname;
-    return 'https://www.google.com/s2/favicons?domain=' + domain + '&sz=32';
-  } catch (e) {
-    return '';
-  }
-}
-
-// --- First-letter avatar colors (consistent per letter) ---
-var AVATAR_COLORS = [
-  '#4A90D9', '#E06C75', '#98C379', '#D19A66', '#C678DD',
-  '#56B6C2', '#E5C07B', '#BE5046', '#61AFEF', '#EF596F',
-  '#89CA78', '#D4BC7D', '#2BBAC5', '#D55FDE', '#E8696A', '#7BC276'
-];
-
-function createLetterAvatar(name, size) {
-  size = size || 18;
-  let letter = (name || '?').charAt(0).toUpperCase();
-  let colorIndex = letter.charCodeAt(0) % AVATAR_COLORS.length;
-  let el = document.createElement('span');
-  el.textContent = letter;
-  el.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:' + size + 'px;height:' + size + 'px;border-radius:50%;background:' + AVATAR_COLORS[colorIndex] + ';color:#fff;font-size:' + Math.round(size * 0.55) + 'px;font-weight:600;flex-shrink:0;line-height:1;';
-  return el;
-}
-
-// Get Chrome's internal favicon URL (same-origin, cached, no network needed)
-function getChromeFaviconUrl(pageUrl, size) {
-  size = size || 32;
-  try {
-    return chrome.runtime.getURL('_favicon/?pageUrl=' + encodeURIComponent(pageUrl) + '&size=' + size);
-  } catch (e) {
-    return '';
-  }
-}
-
-// Check if an image is a real favicon vs Chrome's default placeholder.
-// Works because _favicon URLs are same-origin (chrome-extension://) so canvas is not tainted.
-// Detects both colorful AND monochrome (black/white/gray) real favicons.
-function isRealFavicon(img) {
-  try {
-    let c = document.createElement('canvas');
-    let s = img.naturalWidth || 16;
-    c.width = s;
-    c.height = s;
-    let ctx = c.getContext('2d');
-    ctx.drawImage(img, 0, 0, s, s);
-    let data = ctx.getImageData(0, 0, s, s).data;
-    let opaquePixels = 0;
-    let hasColor = false;
-    let brightnessSet = new Set();
-    for (let i = 0; i < data.length; i += 4) {
-      let r = data[i], g = data[i + 1], b = data[i + 2], a = data[i + 3];
-      if (a > 128) {
-        opaquePixels++;
-        // Check for chromatic color (not gray)
-        if (!hasColor && (Math.abs(r - g) > 15 || Math.abs(g - b) > 15 || Math.abs(r - b) > 15)) {
-          hasColor = true;
-        }
-        // Track quantized brightness for monochrome diversity check
-        brightnessSet.add(Math.floor((r * 0.299 + g * 0.587 + b * 0.114) / 16));
-      }
+  if (e.key === 'Tab') {
+    let focusable = this.querySelectorAll('input, select, textarea, button, [tabindex]:not([tabindex="-1"])');
+    if (focusable.length === 0) { e.preventDefault(); return; }
+    let first = focusable[0];
+    let last = focusable[focusable.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
     }
-    let totalPixels = (s * s);
-    // Mostly transparent → not a real favicon
-    if (opaquePixels < totalPixels * 0.05) return false;
-    // Has chromatic color → real favicon
-    if (hasColor) return true;
-    // Monochrome but with many distinct shades → real favicon (logos, text, etc)
-    // Chrome's default placeholder has very few shade levels (< 4)
-    return brightnessSet.size > 4;
-  } catch (e) {
-    return true; // If canvas fails, assume it's real
   }
+});
+
+// Flip the top form between edit ("Saved as ...") and create modes. Used by
+// the red delete button and by any delete that hits the current page's
+// shortcut (e.g. from a tile's dropdown), so the form never goes stale.
+function setSavedFormState(key) {
+  existingShortcutKey = key;
+  document.getElementById('shortcutName').value = key;
+  document.getElementById('saveButton').textContent = 'Update';
+  document.getElementById('deleteSavedBtn').classList.remove('hidden');
+  document.getElementById('savedBannerText').textContent = 'Saved as "' + key + '"';
+  document.getElementById('savedBanner').classList.remove('hidden');
 }
 
-// Creates a favicon element with smart fallback:
-// 1. Shows Google favicon immediately (fast, works for most sites)
-// 2. Chrome's _favicon API checks in background:
-//    - If Chrome has a REAL favicon → swap to Chrome's (proves it's real, better quality)
-//    - If Chrome has NO real favicon → replace with letter avatar
-//    - If _favicon fails → keep Google image as safe fallback
-function createFaviconEl(url, name, cssClass, size) {
-  size = size || 18;
-  let wrapper = document.createElement('span');
-  wrapper.style.cssText = 'display:inline-flex;align-items:center;justify-content:center;width:' + size + 'px;height:' + size + 'px;flex-shrink:0;';
-  if (cssClass) wrapper.className = cssClass;
-
-  if (!url) {
-    wrapper.appendChild(createLetterAvatar(name, size));
-    return wrapper;
-  }
-
-  // Step 1: Show Google favicon immediately as placeholder
-  let googleUrl = getFaviconUrl(url);
-  let img = document.createElement('img');
-  img.src = googleUrl;
-  img.width = size;
-  img.height = size;
-  img.alt = '';
-  img.style.cssText = 'border-radius:4px;display:block;';
-  img.onerror = function () {
-    wrapper.innerHTML = '';
-    wrapper.appendChild(createLetterAvatar(name, size));
-  };
-  wrapper.appendChild(img);
-
-  // Step 2: Chrome's _favicon API as the authority (same-origin → canvas-readable)
-  let chromeFavUrl = getChromeFaviconUrl(url, size > 16 ? 32 : 16);
-  if (chromeFavUrl) {
-    let checkImg = new Image();
-    checkImg.onload = function () {
-      if (isRealFavicon(checkImg)) {
-        // Chrome has a REAL favicon → use it directly (replaces Google globe/default)
-        checkImg.width = size;
-        checkImg.height = size;
-        checkImg.style.cssText = 'border-radius:4px;display:block;';
-        wrapper.innerHTML = '';
-        wrapper.appendChild(checkImg);
-      } else {
-        // Chrome confirms no real favicon → show letter avatar
-        wrapper.innerHTML = '';
-        wrapper.appendChild(createLetterAvatar(name, size));
-      }
-    };
-    checkImg.onerror = function () {
-      // _favicon failed → keep Google image as fallback
-    };
-    checkImg.src = chromeFavUrl;
-  }
-  return wrapper;
+function clearSavedFormState() {
+  existingShortcutKey = '';
+  document.getElementById('saveButton').textContent = 'Save';
+  document.getElementById('deleteSavedBtn').classList.add('hidden');
+  document.getElementById('savedBanner').classList.add('hidden');
+  document.getElementById('savedBannerFolder').textContent = '';
 }
+
+// Delete the current page's saved shortcut (trash + undo) and its linked
+// bookmark, then flip the form back to create mode.
+document.getElementById('deleteSavedBtn').addEventListener('click', function () {
+  if (!existingShortcutKey) return;
+  deleteShortcut(existingShortcutKey, currentTabUrl, { removeBookmark: true });
+});
+
+// Space types '-' in the shortcut name field (keys can't contain spaces)
+enforceShortcutNameInput(document.getElementById('shortcutName'));
 
 // --- Tag generation (same logic as manage.js) ---
 function generateTagsFromBookmark(title, url) {
@@ -621,6 +398,7 @@ function createPopupTagsInput(containerId, existingTags) {
       removeBtn.className = 'tag-pill-remove';
       removeBtn.innerHTML = '&times;';
       removeBtn.title = 'Remove tag';
+      removeBtn.setAttribute('aria-label', 'Remove tag');
       removeBtn.addEventListener('click', function (e) {
         e.preventDefault();
         existingTags.splice(idx, 1);
@@ -764,7 +542,9 @@ async function showCurrentTabInfo() {
       shortcutInput.placeholder = 'e.g. desk';
       popupTagsWidget = createPopupTagsInput('popupTagsContainer', []);
       document.getElementById('savedBanner').classList.add('hidden');
-      loadFolderDropdown(); // Default to 0tab AI folder
+      // Populate the folder dropdown when idle — bookmarks.getTree can take
+      // 100ms+ on big trees and nothing above the fold depends on it.
+      runWhenIdle(function () { loadFolderDropdown(); }, 400);
       return;
     }
 
@@ -792,6 +572,7 @@ async function showCurrentTabInfo() {
       shortcutInput.value = existingShortcutName;
       shortcutInput.placeholder = 'e.g. ' + existingShortcutName;
       document.getElementById('saveButton').textContent = 'Update';
+      document.getElementById('deleteSavedBtn').classList.remove('hidden');
 
       // Show "already saved" banner
       savedBannerText.textContent = 'Saved as "' + existingShortcutName + '"';
@@ -832,7 +613,7 @@ async function showCurrentTabInfo() {
       }
 
       // Load folder dropdown with the existing bookmark's folder pre-selected
-      loadFolderDropdown(preselectFolderId);
+      runWhenIdle(function () { loadFolderDropdown(preselectFolderId); }, 400);
 
       // Prefill tags from existing data
       let existingTags = (typeof existingData === 'object' && Array.isArray(existingData.tags)) ? existingData.tags : generateTagsFromBookmark(currentTabTitle, currentTabUrl);
@@ -841,11 +622,12 @@ async function showCurrentTabInfo() {
       // Not saved — reset to create mode
       existingShortcutKey = '';
       document.getElementById('saveButton').textContent = 'Save';
+      document.getElementById('deleteSavedBtn').classList.add('hidden');
       savedBanner.classList.add('hidden');
       savedBannerFolder.textContent = '';
 
       // Load folder dropdown with 0tab AI folder as default
-      loadFolderDropdown();
+      runWhenIdle(function () { loadFolderDropdown(); }, 400);
 
       // Generate smart short name suggestion
       let smartName = generateSmartShortName(currentTabTitle, currentTabUrl, existingKeys);
@@ -901,9 +683,8 @@ function getBookmarkFoldersDirect() {
   });
   return _folderTreePromise;
 }
-// Kick the fetch off the moment the script runs so the data is ready by
-// the time showCurrentTabInfo() reaches loadFolderDropdown.
-getBookmarkFoldersDirect();
+// Folder trees can be large, so the popup does not fetch them at script
+// startup. loadFolderDropdown() starts the request when the form needs it.
 
 async function loadFolderDropdown(preselectFolderId) {
   try {
@@ -929,13 +710,58 @@ async function loadFolderDropdown(preselectFolderId) {
       }
     });
 
+    // Let the user create a folder without leaving the popup
+    let createOpt = document.createElement('option');
+    createOpt.value = '__create_folder__';
+    createOpt.textContent = '+ New folder…';
+    select.appendChild(createOpt);
+
     // Auto-select: use preselectFolderId if given, otherwise default to 0tab AI
     let targetId = preselectFolderId || zerotabFolderId;
     if (targetId) select.value = targetId;
+    _lastFolderSelection = select.value;
   } catch (e) {
     console.warn('0tab: loadFolderDropdown error:', e.message);
   }
 }
+
+// "+ New folder…" flow for the main folder dropdown. On cancel the previous
+// selection is restored; on create the dropdown reloads with the new folder
+// selected.
+let _lastFolderSelection = '';
+document.getElementById('folderSelect').addEventListener('change', function () {
+  let select = this;
+  if (select.value !== '__create_folder__') {
+    _lastFolderSelection = select.value;
+    return;
+  }
+  let revert = function () { select.value = _lastFolderSelection; };
+  showModal({
+    title: 'New folder',
+    inputs: [
+      { id: 'newfoldername', label: 'FOLDER NAME', value: '', placeholder: 'e.g. Work' }
+    ],
+    buttons: [
+      { text: 'Cancel', className: 'modal-btn-cancel', onClick: revert },
+      {
+        text: 'Create', className: 'modal-btn-save', onClick: function () {
+          let name = document.getElementById('modal-input-newfoldername').value.trim();
+          if (!name) { revert(); showToast('Folder name required.', 'error'); return; }
+          // No parentId — Chrome places it under "Other bookmarks"
+          chrome.bookmarks.create({ title: name }, function (newFolder) {
+            if (chrome.runtime.lastError || !newFolder) {
+              revert();
+              showToast('Could not create folder: ' + ((chrome.runtime.lastError && chrome.runtime.lastError.message) || 'unknown error'), 'error');
+              return;
+            }
+            loadFolderDropdown(newFolder.id);
+            showToast('Folder "' + name + '" created', 'success');
+          });
+        }
+      }
+    ]
+  });
+});
 
 // ============================================================
 // SAVE (creates both a Chrome bookmark + 0tab shortcut)
@@ -945,11 +771,19 @@ async function saveShortcut() {
   let bookmarkTitle = document.getElementById('bookmarkName').value.trim();
   let shortcutName = document.getElementById('shortcutName').value.trim().toLowerCase().replace(/\s+/g, '');
   let folderId = document.getElementById('folderSelect').value || undefined;
+  if (folderId === '__create_folder__') folderId = undefined;
 
 
   if (!shortcutName && !bookmarkTitle) { showToast('Enter a name.', 'error'); return; }
   if (shortcutName && shortcutName.length > 15) { showToast('Shortcut name must be 15 chars or less.', 'error'); return; }
   if (shortcutName && /\s/.test(shortcutName)) { showToast('No spaces in shortcut name.', 'error'); return; }
+
+  // Disable the button while the async save runs so double-clicks can't
+  // create duplicates, and show progress.
+  let saveBtn = document.getElementById('saveButton');
+  let saveBtnLabel = saveBtn.textContent;
+  saveBtn.disabled = true;
+  saveBtn.textContent = 'Saving…';
 
   try {
     let url = document.getElementById('urlDisplay').value.trim();
@@ -997,8 +831,10 @@ async function saveShortcut() {
       }
     }
 
-    // If no folder selected, default to the canonical 0tab AI folder
-    if (!folderId) {
+    // If no folder selected, default to the canonical 0tab AI folder.
+    // Create mode only — in edit mode an empty selection means "keep the
+    // bookmark where it is", not "move it to the default folder".
+    if (!folderId && !isEditMode) {
       try {
         folderId = await new Promise((resolve, reject) => {
           let timeout = setTimeout(() => resolve(undefined), 3000); // Prevent hanging if service worker is asleep
@@ -1157,6 +993,15 @@ async function saveShortcut() {
       });
 
       showToast('Saved ' + shortcutName, 'success');
+
+      // Advisory duplicate check (Settings → AI features → Duplicate
+      // detection). Fire-and-forget; background returns null when the
+      // feature is disabled or no similar shortcut is found.
+      aiDetectDuplicates(bookmarkTitle || shortcutName, url).then(dupes => {
+        if (dupes && dupes.length > 0) {
+          showToast('Heads up: looks similar to "' + dupes[0] + '"', 'info', { duration: 4000 });
+        }
+      });
     } else if (bookmarkTitle) {
       // Bookmark-only path (user provided a title but no shortcut name).
       // Still surface the saved banner so the user gets the same instant
@@ -1173,12 +1018,19 @@ async function saveShortcut() {
   } catch (err) {
     console.error('0tab: saveShortcut error:', err);
     showToast('Error: ' + err.message, 'error');
+  } finally {
+    saveBtn.disabled = false;
+    // Success paths may have flipped the label to "Update" — keep that.
+    if (saveBtn.textContent === 'Saving…') saveBtn.textContent = saveBtnLabel;
   }
 }
 
 // ============================================================
 // LOAD SHORTCUTS (with favicons)
 // ============================================================
+const POPUP_INITIAL_RENDER_LIMIT = 80;
+const POPUP_SEARCH_RENDER_LIMIT = 120;
+
 // Search scoring: higher score = better match
 // Priority: Shortcut Name (4) > Bookmark Name (3) > Tags (2) > URL (1)
 function getSearchScore(key, data, searchValue) {
@@ -1223,7 +1075,8 @@ function getSearchScore(key, data, searchValue) {
 
 // Helper: open all URLs in a folder shortcut (with optional tab group)
 async function openFolderShortcutUrls(urls, shortcutKey, data) {
-  if (!urls || urls.length === 0) return;
+  urls = (urls || []).filter(isOpenableUrl);
+  if (urls.length === 0) return;
 
   // Increment access count
   if (shortcutKey && data && typeof data === 'object') {
@@ -1377,6 +1230,8 @@ async function handlePinDrop(draggedKey, targetKey, dropBefore) {
   }
 }
 
+let _renderToken = 0; // invalidates pending idle-chunk appends from stale renders
+
 async function loadShortcuts() {
   let searchValue = document.getElementById('searchShortcuts').value.toLowerCase().trim();
 
@@ -1384,6 +1239,7 @@ async function loadShortcuts() {
     let items = await storageGetAllCached();
     let list = document.getElementById('shortcutList');
     list.innerHTML = '';
+    let renderToken = ++_renderToken;
 
     // Apply the current view mode class
     list.className = currentViewMode === 'list' ? 'shortcuts-list' : 'shortcuts-grid';
@@ -1419,20 +1275,20 @@ async function loadShortcuts() {
       });
     }
 
-    let shown = 0;
-    for (let i = 0; i < scored.length; i++) {
-      let key = scored[i].key;
-      let data = scored[i].data;
+    let renderLimit = searchValue ? POPUP_SEARCH_RENDER_LIMIT : POPUP_INITIAL_RENDER_LIMIT;
+    let renderItems = scored.slice(0, renderLimit);
+    let shown = renderItems.length;
+
+    function buildShortcutTile(key, data) {
       let isFolder = typeof data === 'object' && data.type === 'folder';
       let url = isFolder ? '' : ((typeof data === 'object') ? data.url : data);
       let urls = isFolder ? (data.urls || []) : [];
-      let count = (typeof data === 'object') ? (data.count || 0) : 0;
       let tags = (typeof data === 'object' && Array.isArray(data.tags)) ? data.tags : [];
 
-      shown++;
       let pinned = typeof data === 'object' && data && data.pinned === true;
       let li = document.createElement('li');
       li.dataset.shortcutKey = key;
+      li.tabIndex = 0; // keyboard-focusable so focus-within reveals the action menu
       if (pinned) li.classList.add('shortcut-pinned');
       // Native HTML5 drag — used both for reordering pinned tiles and
       // for "drag to top to pin" an unpinned tile.
@@ -1455,6 +1311,7 @@ async function loadShortcuts() {
       } else {
         // Click single shortcut → open in same tab
         inner.addEventListener('click', function () {
+          if (!isOpenableUrl(url)) { showToast('Blocked unsafe URL.', 'error'); return; }
           chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
             if (tabs[0]) {
               chrome.tabs.update(tabs[0].id, { url: url });
@@ -1463,6 +1320,16 @@ async function loadShortcuts() {
           });
         });
       }
+
+      // Keyboard activation. On li (the focusable element, tabIndex=0), and
+      // only when li itself is focused — child buttons keep native behavior.
+      li.addEventListener('keydown', function (e) {
+        if (e.target !== li) return;
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          inner.click();
+        }
+      });
 
       // Favicon / folder icon
       if (isFolder) {
@@ -1492,6 +1359,7 @@ async function loadShortcuts() {
         let pinBadge = document.createElement('button');
         pinBadge.className = 'shortcut-pin-badge';
         pinBadge.title = 'Pinned — click to unpin';
+        pinBadge.setAttribute('aria-label', 'Pinned — click to unpin');
         pinBadge.innerHTML = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z" fill="currentColor"/></svg>';
         pinBadge.addEventListener('click', function (e) {
           e.stopPropagation();
@@ -1527,6 +1395,7 @@ async function loadShortcuts() {
       let pinBtn = document.createElement('button');
       pinBtn.className = 'pin-icon' + (pinned ? ' pin-icon-active' : '');
       pinBtn.title = pinned ? 'Unpin' : 'Pin to top';
+      pinBtn.setAttribute('aria-label', pinned ? 'Unpin' : 'Pin to top');
       pinBtn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="17" x2="12" y2="22"/><path d="M5 17h14v-1.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V6h1a2 2 0 0 0 0-4H8a2 2 0 0 0 0 4h1v4.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24Z"' + (pinned ? ' fill="currentColor"' : '') + '/></svg>';
       pinBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePin(key, !pinned); });
       dropdown.appendChild(pinBtn);
@@ -1534,6 +1403,7 @@ async function loadShortcuts() {
       let edit = document.createElement('button');
       edit.className = 'edit-icon';
       edit.title = 'Edit';
+      edit.setAttribute('aria-label', 'Edit');
       edit.addEventListener('click', (e) => { e.stopPropagation(); editShortcut(key, url || ('folder:' + key)); });
       dropdown.appendChild(edit);
 
@@ -1541,6 +1411,7 @@ async function loadShortcuts() {
         let openAll = document.createElement('button');
         openAll.className = 'go-to-icon';
         openAll.title = 'Open all in tab group';
+        openAll.setAttribute('aria-label', 'Open all in tab group');
         openAll.addEventListener('click', (e) => {
           e.stopPropagation();
           openFolderShortcutUrls(urls, key, data);
@@ -1550,18 +1421,21 @@ async function loadShortcuts() {
         let go = document.createElement('button');
         go.className = 'go-to-icon';
         go.title = 'Open in new tab';
-        go.addEventListener('click', (e) => { e.stopPropagation(); chrome.tabs.create({ url: url }); });
+        go.setAttribute('aria-label', 'Open in new tab');
+        go.addEventListener('click', (e) => { e.stopPropagation(); if (!isOpenableUrl(url)) return; chrome.tabs.create({ url: url }); });
         dropdown.appendChild(go);
       }
 
       let copy = document.createElement('button');
       copy.className = 'copy-icon';
       copy.title = 'Copy URL';
+      copy.setAttribute('aria-label', 'Copy URL');
       copy.addEventListener('click', (e) => {
         e.stopPropagation();
         let textToCopy = isFolder ? (key + '\n' + urls.map((u, i) => (i + 1) + '. ' + u).join('\n')) : url;
         navigator.clipboard.writeText(textToCopy).then(() => {
           copy.title = 'Copied!';
+          copy.setAttribute('aria-label', 'Copied!');
           setTimeout(() => { copy.title = 'Copy URL'; }, 1500);
         });
       });
@@ -1570,6 +1444,7 @@ async function loadShortcuts() {
       let del = document.createElement('button');
       del.className = 'delete-icon';
       del.title = 'Delete';
+      del.setAttribute('aria-label', 'Delete');
       del.addEventListener('click', (e) => { e.stopPropagation(); deleteShortcut(key, url || ('folder:' + key)); });
       dropdown.appendChild(del);
 
@@ -1645,6 +1520,7 @@ async function loadShortcuts() {
           childRow.style.cursor = 'pointer';
           childRow.addEventListener('click', function (e) {
             e.stopPropagation();
+            if (!isOpenableUrl(childUrl)) { showToast('Blocked unsafe URL.', 'error'); return; }
             chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
               if (tabs[0]) {
                 chrome.tabs.update(tabs[0].id, { url: childUrl });
@@ -1660,6 +1536,7 @@ async function loadShortcuts() {
           let childEdit = document.createElement('button');
           childEdit.className = 'edit-icon';
           childEdit.title = 'Edit';
+          childEdit.setAttribute('aria-label', 'Edit');
           childEdit.addEventListener('click', function (e) {
             e.stopPropagation();
             let currentTitle = (urlTitles[idx] && urlTitles[idx].trim()) ? urlTitles[idx] : '';
@@ -1675,14 +1552,14 @@ async function loadShortcuts() {
                   return { value: f.id, label: indent + (f.title || '(Untitled)') };
                 })
               );
-              let cCurrentFolderId = data.folderId || '';
+              let cCurrentFolderId = data.folderId || data.bmFolderId || '';
               let cTagsConf = { id: 'tags', tags: [] };
 
               showModal({
                 title: 'Edit Bookmark',
                 inputs: [
                   { id: 'bmname', label: 'BOOKMARK NAME', value: currentTitle, placeholder: 'Chrome bookmark title' },
-                  { id: 'shortcut', label: '0TAB SHORTCUT', value: '', placeholder: 'e.g. yt (leave empty to skip)' },
+                  { id: 'shortcut', label: '0TAB SHORTCUT', value: '', placeholder: 'e.g. yt (leave empty to skip)', noSpaces: true },
                   { id: 'url', label: 'URL', value: childUrl, placeholder: 'https://...' },
                   { id: 'folder', label: 'FOLDER', type: 'select', selectOptions: cFolderData, value: cCurrentFolderId },
                   { id: 'tags', label: 'TAGS', type: 'tags' }
@@ -1714,8 +1591,10 @@ async function loadShortcuts() {
           let childGo = document.createElement('button');
           childGo.className = 'go-to-icon';
           childGo.title = 'Open in new tab';
+          childGo.setAttribute('aria-label', 'Open in new tab');
           childGo.addEventListener('click', function (e) {
             e.stopPropagation();
+            if (!isOpenableUrl(childUrl)) return;
             chrome.tabs.create({ url: childUrl });
           });
           childActions.appendChild(childGo);
@@ -1723,10 +1602,12 @@ async function loadShortcuts() {
           let childCopy = document.createElement('button');
           childCopy.className = 'copy-icon';
           childCopy.title = 'Copy URL';
+          childCopy.setAttribute('aria-label', 'Copy URL');
           childCopy.addEventListener('click', function (e) {
             e.stopPropagation();
             navigator.clipboard.writeText(childUrl).then(() => {
               childCopy.title = 'Copied!';
+              childCopy.setAttribute('aria-label', 'Copied!');
               setTimeout(() => { childCopy.title = 'Copy URL'; }, 1500);
             });
           });
@@ -1735,6 +1616,7 @@ async function loadShortcuts() {
           let childDel = document.createElement('button');
           childDel.className = 'delete-icon';
           childDel.title = 'Remove from folder';
+          childDel.setAttribute('aria-label', 'Remove from folder');
           childDel.addEventListener('click', function (e) {
             e.stopPropagation();
             // Remove this URL from the folder shortcut
@@ -1764,7 +1646,27 @@ async function loadShortcuts() {
         li.appendChild(childContainer);
       }
 
-      list.appendChild(li);
+      return li;
+    }
+
+    // Chunked render: paint the first tiles immediately, attach the rest
+    // when the main thread is idle so first paint isn't gated on 80 tiles.
+    const FIRST_CHUNK = 24;
+    let shortcutFragment = document.createDocumentFragment();
+    let firstCount = Math.min(renderItems.length, FIRST_CHUNK);
+    for (let i = 0; i < firstCount; i++) {
+      shortcutFragment.appendChild(buildShortcutTile(renderItems[i].key, renderItems[i].data));
+    }
+    if (shown > 0) list.appendChild(shortcutFragment);
+    if (renderItems.length > FIRST_CHUNK) {
+      runWhenIdle(function () {
+        if (renderToken !== _renderToken) return; // superseded by a newer render
+        let rest = document.createDocumentFragment();
+        for (let i = FIRST_CHUNK; i < renderItems.length; i++) {
+          rest.appendChild(buildShortcutTile(renderItems[i].key, renderItems[i].data));
+        }
+        list.appendChild(rest);
+      }, 250);
     }
 
     if (shown === 0 && searchValue && keys.length > 0) {
@@ -1797,6 +1699,7 @@ async function loadShortcuts() {
               let urls = isFolder ? (data.urls || []) : [];
 
               let li = document.createElement('li');
+              li.tabIndex = 0;
               let inner = document.createElement('div');
               inner.className = 'shortcut-inner';
               inner.style.cursor = 'pointer';
@@ -1807,11 +1710,20 @@ async function loadShortcuts() {
                 });
               } else {
                 inner.addEventListener('click', function () {
+                  if (!isOpenableUrl(url)) { showToast('Blocked unsafe URL.', 'error'); return; }
                   chrome.tabs.query({ active: true, currentWindow: true }, function (tabs) {
                     if (tabs[0]) { chrome.tabs.update(tabs[0].id, { url: url }); window.close(); }
                   });
                 });
               }
+
+              li.addEventListener('keydown', function (e) {
+                if (e.target !== li) return;
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  inner.click();
+                }
+              });
 
               if (isFolder) {
                 let folderSvg = document.createElement('span');
@@ -1842,33 +1754,35 @@ async function loadShortcuts() {
               list.innerHTML = '';
               let empty = document.createElement('li');
               empty.className = 'empty-state';
-              empty.textContent = 'No matches found.';
+              empty.textContent = 'No matches for "' + searchValue + '"';
               list.appendChild(empty);
             }
           } else {
             list.innerHTML = '';
             let empty = document.createElement('li');
             empty.className = 'empty-state';
-            empty.textContent = 'No matches found.';
+            empty.textContent = 'No matches for "' + searchValue + '"';
             list.appendChild(empty);
           }
         } catch (e) {
           list.innerHTML = '';
           let empty = document.createElement('li');
           empty.className = 'empty-state';
-          empty.textContent = 'No matches found.';
+          empty.textContent = 'No matches for "' + searchValue + '"';
           list.appendChild(empty);
         }
       } else {
         let empty = document.createElement('li');
         empty.className = 'empty-state';
-        empty.textContent = 'No matches found.';
+        empty.textContent = 'No matches for "' + searchValue + '"';
         list.appendChild(empty);
       }
     } else if (shown === 0) {
       let empty = document.createElement('li');
       empty.className = 'empty-state';
-      empty.textContent = keys.length === 0 ? 'No shortcuts yet. Create one above!' : 'No matches found.';
+      empty.textContent = keys.length === 0
+        ? 'No shortcuts yet. Save this page above to create your first one.'
+        : (searchValue ? 'No matches for "' + searchValue + '"' : 'No matches found.');
       list.appendChild(empty);
     }
   } catch (err) {
@@ -1888,32 +1802,120 @@ async function addToTrashPopup(name, data) {
       trashItem.type = 'folder';
       trashItem.urls = data.urls || [];
       trashItem.urlTitles = data.urlTitles || [];
-      trashItem.folderId = data.folderId || '';
+      trashItem.folderId = data.folderId || data.bmFolderId || '';
       trashItem.folderTitle = data.folderTitle || '';
     }
     trash.push(trashItem);
     let cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
     trash = trash.filter(function (t) { return t.deletedAt > cutoff; });
     await storageSet({ '__0tab_trash': trash });
-  } catch (e) { /* silently fail */ }
+    return trashItem;
+  } catch (e) { return null; }
 }
 
-function deleteShortcut(name, url) {
+function deleteShortcut(name, url, opts) {
+  opts = opts || {};
   showModal({
     title: 'Delete ' + name + '?',
-    body: 'This will remove this shortcut. You can restore it from trash.',
+    body: 'This will move the shortcut to trash. You can restore it from the Dashboard for 30 days.',
     buttons: [
       { text: 'Cancel', className: 'modal-btn-cancel' },
       {
         text: 'Delete', className: 'modal-btn-danger', onClick: async function () {
           try {
             let existing = await storageGet(name);
-            let data = existing[name] || {};
+            if (!existing || !(name in existing)) {
+              // Key vanished (deleted elsewhere, synced away) — nothing to
+              // trash, and a fabricated {} entry would poison Undo.
+              if (name === existingShortcutKey) clearSavedFormState();
+              loadShortcuts();
+              showToast('That shortcut is already gone.', 'info');
+              return;
+            }
+            let data = existing[name];
             if (typeof data === 'string') data = { url: data };
-            await addToTrashPopup(name, data);
+            let trashItem = await addToTrashPopup(name, data);
             await storageRemove(name);
-            showToast('Deleted ' + name, 'success');
+
+            // Also remove the linked Chrome bookmark, else the bookmark
+            // sync re-imports it and the shortcut resurrects on reconcile.
+            // Never when another shortcut still points at the same bookmark:
+            // the background onRemoved sync would silently delete that
+            // sibling with no trash entry.
+            let removedBookmark = false;
+            let removedBookmarkNode = null;
+            let attemptedRemove = false;
+            if (opts.removeBookmark && data.bookmarkId) {
+              let allItems = await storageGet(null);
+              let sharedWithSibling = Object.keys(allItems).filter(isShortcutKey).some(function (k) {
+                let d = allItems[k];
+                return d && typeof d === 'object' && d.bookmarkId === data.bookmarkId;
+              });
+              if (!sharedWithSibling) {
+                attemptedRemove = true;
+                // Capture the node first so Undo can put it back where it was.
+                removedBookmarkNode = await new Promise(function (resolve) {
+                  chrome.bookmarks.get(data.bookmarkId, function (results) {
+                    if (chrome.runtime.lastError || !results || !results[0]) { resolve(null); return; }
+                    resolve(results[0]);
+                  });
+                });
+                if (removedBookmarkNode) {
+                  removedBookmark = await new Promise(function (resolve) {
+                    chrome.bookmarks.remove(data.bookmarkId, function () {
+                      resolve(!chrome.runtime.lastError);
+                    });
+                  });
+                }
+              }
+            }
+
             loadShortcuts();
+            if (name === existingShortcutKey) clearSavedFormState();
+            showToast('Deleted ' + name, 'success', {
+              actionText: 'Undo',
+              duration: 5000,
+              onAction: async function () {
+                try {
+                  let restoreData = data;
+                  if (removedBookmark && removedBookmarkNode) {
+                    // Re-create the bookmark exactly where it was (same
+                    // folder and position) and re-link the shortcut to it.
+                    restoreData = Object.assign({}, data);
+                    delete restoreData.bookmarkId;
+                    let newBm = await new Promise(function (resolve) {
+                      chrome.bookmarks.create({
+                        parentId: removedBookmarkNode.parentId,
+                        index: removedBookmarkNode.index,
+                        title: removedBookmarkNode.title,
+                        url: removedBookmarkNode.url
+                      }, function (created) {
+                        if (chrome.runtime.lastError || !created) { resolve(null); return; }
+                        resolve(created);
+                      });
+                    });
+                    if (newBm) restoreData.bookmarkId = newBm.id;
+                  } else if (attemptedRemove && !removedBookmarkNode) {
+                    // The stored id was already dangling — don't restore it.
+                    restoreData = Object.assign({}, data);
+                    delete restoreData.bookmarkId;
+                  }
+                  await storageSet({ [name]: restoreData });
+                  // Drop exactly the trash copy this delete made — same-name
+                  // entries from older deletions must survive.
+                  if (trashItem) {
+                    let res = await storageGet(['__0tab_trash']);
+                    let trash = (res['__0tab_trash'] || []).filter(function (t) {
+                      return !(t && t.name === name && t.deletedAt === trashItem.deletedAt);
+                    });
+                    await storageSet({ '__0tab_trash': trash });
+                  }
+                  loadShortcuts();
+                  if (currentTabUrl && (restoreData.url || '') === currentTabUrl) setSavedFormState(name);
+                  showToast('Restored ' + name, 'success');
+                } catch (e) { showToast('Could not restore: ' + e.message, 'error'); }
+              }
+            });
           } catch (err) { showToast('Error: ' + err.message, 'error'); }
         }
       }
@@ -1943,12 +1945,12 @@ function editShortcut(key, url) {
         })
       );
 
-      let currentFolderId = (typeof data === 'object' && data.folderId) ? data.folderId : '';
+      let currentFolderId = (typeof data === 'object' && (data.folderId || data.bmFolderId)) ? (data.folderId || data.bmFolderId) : '';
 
       // Consistent fields for all shortcut types: Bookmark Name, 0tab Shortcut, URL, Folder, Tags
       let inputs = [
         { id: 'bmname', label: 'BOOKMARK NAME', value: bookmarkTitle, placeholder: 'Chrome bookmark title' },
-        { id: 'shortcut', label: '0TAB SHORTCUT', value: key, placeholder: 'e.g. yt (lowercase, no spaces)' }
+        { id: 'shortcut', label: '0TAB SHORTCUT', value: key, placeholder: 'e.g. yt (lowercase, no spaces)', noSpaces: true }
       ];
 
       if (!isFolder) {
@@ -1986,7 +1988,8 @@ function editShortcut(key, url) {
                     type: 'folder',
                     urls: data.urls || [],
                     urlTitles: data.urlTitles || [],
-                    folderId: folderId || data.folderId,
+                    folderId: folderId || data.folderId || data.bmFolderId,
+                    bmFolderId: folderId || data.folderId || data.bmFolderId,
                     folderTitle: newBmName || data.folderTitle || newShortcut,
                     bookmarkTitle: newBmName,
                     count: data.count || 0,
@@ -2120,6 +2123,7 @@ async function saveFolderShortcut() {
                   type: 'folder',
                   urls: urls,
                   folderId: folderId,
+                  bmFolderId: folderId,
                   folderTitle: folderTitle || shortcutName,
                   count: 0,
                   tags: ['folder'],
@@ -2170,7 +2174,9 @@ document.getElementById('shortcutName').addEventListener('keypress', (e) => { if
   });
 })();
 
-document.getElementById('searchShortcuts').addEventListener('keyup', debounce(loadShortcuts, 300));
+// 'input' (not 'keyup') also catches paste/clear; 150ms keeps typing snappy
+// now that re-renders are chunked.
+document.getElementById('searchShortcuts').addEventListener('input', debounce(loadShortcuts, 150));
 
 // View toggle
 document.getElementById('viewToggle').addEventListener('click', function () {

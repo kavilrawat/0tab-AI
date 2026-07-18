@@ -8,11 +8,33 @@
 
   // --- Constants ---
   let sendMessageFn = null; // Will be assigned when sendMessage is defined
-  const CHAT_INTERNAL_KEYS = ['__0tab_folders', '__0tab_settings', '__0tab_trash', '__0tab_migrated_v1', '__0tab_migrated_v2', '__0tab_daily_stats'];
+  // Alias to the shared isShortcutKey (shared.js). sanitizeForPrompt also
+  // comes from shared.js now.
   function isChatShortcutKey(key) {
-    if (!key || typeof key !== 'string') return false;
-    if (key.startsWith('__')) return false;
-    return !CHAT_INTERNAL_KEYS.includes(key);
+    return isShortcutKey(key);
+  }
+
+  // Unwrap AI replies that arrive as JSON (e.g. {"response":"..."} from
+  // models that follow the JSON-only system prompt too faithfully) so the
+  // chat always renders natural language.
+  function extractChatText(raw) {
+    if (!raw || typeof raw !== 'string') return raw;
+    let t = raw.trim().replace(/^```json?\s*/i, '').replace(/```\s*$/, '').trim();
+    if (t[0] !== '{' && t[0] !== '[') return raw;
+    try {
+      let obj = JSON.parse(t);
+      for (let depth = 0; depth < 3 && obj && typeof obj === 'object'; depth++) {
+        let cand = obj.response !== undefined ? obj.response
+          : obj.message !== undefined ? obj.message
+          : obj.text !== undefined ? obj.text
+          : obj.answer !== undefined ? obj.answer
+          : obj.reply;
+        if (typeof cand === 'string') return cand;
+        if (cand && typeof cand === 'object') { obj = cand; continue; }
+        break;
+      }
+    } catch (e) { /* not valid JSON — show as-is */ }
+    return raw;
   }
 
   // --- Trash System ---
@@ -38,7 +60,7 @@
       trash = trash.filter(function (t) { return t.deletedAt > cutoff; });
       let data = {}; data[TRASH_STORAGE_KEY] = trash;
       await chatStorageSet(data);
-    } catch (e) { /* silently fail */ }
+    } catch (e) { console.warn('0tab: addToTrash failed:', e); }
   }
 
   async function getTrashItems() {
@@ -47,7 +69,7 @@
       let trash = result[TRASH_STORAGE_KEY] || [];
       let cutoff = Date.now() - TRASH_MAX_AGE_MS;
       return trash.filter(function (t) { return t.deletedAt > cutoff; });
-    } catch (e) { return []; }
+    } catch (e) { console.warn('0tab: getTrashItems failed:', e); return []; }
   }
 
   async function restoreFromTrash(index) {
@@ -68,14 +90,14 @@
       await chatStorageSet(trashData);
       if (typeof loadShortcutsTable === 'function') loadShortcutsTable();
       return item;
-    } catch (e) { return false; }
+    } catch (e) { console.warn('0tab: restoreFromTrash failed:', e); return false; }
   }
 
   async function clearTrash() {
     try {
       let data = {}; data[TRASH_STORAGE_KEY] = [];
       await chatStorageSet(data);
-    } catch (e) {}
+    } catch (e) { console.warn('0tab: clearTrash failed:', e); }
   }
 
   // --- Conversation Context ---
@@ -89,7 +111,7 @@
 
   function getConversationContext() {
     return conversationHistory.slice(-6).map(function (m) {
-      return (m.role === 'user' ? 'User' : '0tab') + ': ' + m.text;
+      return (m.role === 'user' ? 'User' : '0tab') + ': ' + sanitizeForPrompt(m.text);
     }).join('\n');
   }
 
@@ -303,8 +325,8 @@
       '<span style="font-size:11px;color:var(--text-muted);">Reviewing unused bookmarks (' + remaining + ' remaining)</span>' +
       '</div>' +
       '<div class="chat-list-item"><img src="' + fav + '">' +
-      '<span class="chat-list-name">' + chatEscapeHtml(item.name) + '</span>' +
-      '<span class="chat-list-meta">' + chatEscapeHtml(item.url.substring(0, 40)) + (item.url.length > 40 ? '...' : '') + '</span>' +
+      '<span class="chat-list-name">' + escapeHtml(item.name) + '</span>' +
+      '<span class="chat-list-meta">' + escapeHtml(item.url.substring(0, 40)) + (item.url.length > 40 ? '...' : '') + '</span>' +
       '</div>' +
       '<div style="font-size:12px;margin-top:4px;">Never opened. Delete it?</div>';
 
@@ -389,11 +411,11 @@
           await chatStorageSet(data);
         }
         if (typeof loadShortcutsTable === 'function') loadShortcutsTable();
-        return 'Tagged <strong>' + untagged.length + '</strong> shortcut' + (untagged.length !== 1 ? 's' : '') + ' with <strong>#' + chatEscapeHtml(tagName) + '</strong>!';
+        return 'Tagged <strong>' + untagged.length + '</strong> shortcut' + (untagged.length !== 1 ? 's' : '') + ' with <strong>#' + escapeHtml(tagName) + '</strong>!';
       };
 
       return {
-        text: 'Add tag <strong>#' + chatEscapeHtml(tagName) + '</strong> to <strong>' + untagged.length + '</strong> untagged shortcut' + (untagged.length !== 1 ? 's' : '') + '?',
+        text: 'Add tag <strong>#' + escapeHtml(tagName) + '</strong> to <strong>' + untagged.length + '</strong> untagged shortcut' + (untagged.length !== 1 ? 's' : '') + '?',
         options: [
           { label: 'Yes, tag them', query: 'Yes' },
           { label: 'No', query: 'No' }
@@ -490,6 +512,10 @@
 
   async function showNextOrganizeItem() {
     let ctx = conversationState.context;
+    // The organize flow may have been reset (user typed 'skip'/'stop' or
+    // switched intent) while a folder-creation modal was still open; its
+    // callback then lands here with no context — nothing left to advance.
+    if (!ctx || !ctx.unorganized) return null;
     if (ctx.index >= ctx.unorganized.length) {
       let summary = 'All done! Organized <strong>' + ctx.organized + '</strong> shortcut' + (ctx.organized !== 1 ? 's' : '') + ' into folders.';
       resetConversationState();
@@ -539,8 +565,8 @@
       '<span style="font-size:11px;color:var(--text-muted);">Organizing (' + remaining + ' remaining)</span>' +
       '</div>' +
       '<div class="chat-list-item"><img src="' + fav + '">' +
-      '<span class="chat-list-name">' + chatEscapeHtml(item.name) + '</span>' +
-      '<span class="chat-list-meta">' + chatEscapeHtml(item.url.substring(0, 40)) + '</span>' +
+      '<span class="chat-list-name">' + escapeHtml(item.name) + '</span>' +
+      '<span class="chat-list-meta">' + escapeHtml(item.url.substring(0, 40)) + '</span>' +
       '</div>' +
       '<div style="font-size:12px;margin-top:4px;">Which folder should this go in?</div>';
 
@@ -625,8 +651,8 @@
                   currentCtx.index++;
                   if (currentCtx.recentFolders && currentCtx.recentFolders.indexOf(name) < 0) currentCtx.recentFolders.push(name);
                   if (typeof loadBookmarksView === 'function') loadBookmarksView();
-                  let shortcutMsg = shortcutName ? ' Shortcut <strong>' + chatEscapeHtml(shortcutName) + '</strong> created.' : '';
-                  addMessage('bot', 'Created folder <strong>' + chatEscapeHtml(name) + '</strong> and moved <strong>' + chatEscapeHtml(currentItem.name) + '</strong> into it.' + shortcutMsg);
+                  let shortcutMsg = shortcutName ? ' Shortcut <strong>' + escapeHtml(shortcutName) + '</strong> created.' : '';
+                  addMessage('bot', 'Created folder <strong>' + escapeHtml(name) + '</strong> and moved <strong>' + escapeHtml(currentItem.name) + '</strong> into it.' + shortcutMsg);
                   // Continue to next item
                   showNextOrganizeItem().then(function (resp) {
                     if (resp) {
@@ -668,7 +694,7 @@
           return showNextOrganizeItem();
         } catch (e) {
           conversationState.mode = 'workflow';
-          return 'Failed to create folder: ' + chatEscapeHtml(e.message);
+          return 'Failed to create folder: ' + escapeHtml(e.message);
         }
       };
       return 'What should the new folder be called?';
@@ -745,8 +771,8 @@
                   currentCtx2.index++;
                   if (currentCtx2.recentFolders && currentCtx2.recentFolders.indexOf(name) < 0) currentCtx2.recentFolders.push(name);
                   if (typeof loadBookmarksView === 'function') loadBookmarksView();
-                  let shortcutMsg2 = shortcutName ? ' Shortcut <strong>' + chatEscapeHtml(shortcutName) + '</strong> created.' : '';
-                  addMessage('bot', 'Created folder <strong>' + chatEscapeHtml(name) + '</strong> and moved <strong>' + chatEscapeHtml(currentItem2.name) + '</strong> into it.' + shortcutMsg2);
+                  let shortcutMsg2 = shortcutName ? ' Shortcut <strong>' + escapeHtml(shortcutName) + '</strong> created.' : '';
+                  addMessage('bot', 'Created folder <strong>' + escapeHtml(name) + '</strong> and moved <strong>' + escapeHtml(currentItem2.name) + '</strong> into it.' + shortcutMsg2);
                   showNextOrganizeItem().then(function (resp) {
                     if (resp) {
                       if (typeof resp === 'object' && resp.text) addMessage('bot', resp.text, resp.options);
@@ -758,7 +784,7 @@
             }}
           ]
         });
-        return 'Folder <strong>' + chatEscapeHtml(prefillName) + '</strong> doesn\'t exist. Opening the form to create it...';
+        return 'Folder <strong>' + escapeHtml(prefillName) + '</strong> doesn\'t exist. Opening the form to create it...';
       }
 
       // Fallback: chat-based confirmation
@@ -785,7 +811,7 @@
           return showNextOrganizeItem();
         } catch (e) {
           conversationState.mode = 'workflow';
-          return 'Failed to create folder: ' + chatEscapeHtml(e.message);
+          return 'Failed to create folder: ' + escapeHtml(e.message);
         }
       };
       conversationState.pendingCancel = async function () {
@@ -793,7 +819,7 @@
         return showNextOrganizeItem();
       };
       return {
-        text: 'Folder <strong>' + chatEscapeHtml(folderNameOrSkip.trim()) + '</strong> doesn\'t exist. Create it?',
+        text: 'Folder <strong>' + escapeHtml(folderNameOrSkip.trim()) + '</strong> doesn\'t exist. Create it?',
         options: [
           { label: 'Yes, create it', query: 'Yes' },
           { label: 'Skip this one', query: 'No' }
@@ -861,7 +887,7 @@
         if (!alreadySaved) {
           let displayTitle = (currentTab.title || currentTab.url).substring(0, 60);
           insights.push({
-            text: 'Saw you\'re on <strong>' + chatEscapeHtml(displayTitle) + '</strong>. Want me to save it?',
+            text: 'Saw you\'re on <strong>' + escapeHtml(displayTitle) + '</strong>. Want me to save it?',
             options: [
               { label: 'Save this page', query: 'Save this page' },
               { label: 'Not now', query: 'No thanks' }
@@ -940,7 +966,7 @@
         // Milestone celebrations
         if (totalUses > 0 && totalUses % 50 < 5) {
           insights.push({
-            text: 'You\'ve used your shortcuts <strong>' + totalUses + '</strong> times! Your most used is <strong>' + (shortcuts.sort(function (a, b) { return b.count - a.count; })[0] || {}).name + '</strong>.',
+            text: 'You\'ve used your shortcuts <strong>' + totalUses + '</strong> times! Your most used is <strong>' + escapeHtml((shortcuts.sort(function (a, b) { return b.count - a.count; })[0] || {}).name) + '</strong>.',
             options: [
               { label: 'Show top shortcuts', query: 'Show most used shortcuts' },
               { label: 'View stats', query: 'How many bookmarks do I have?' }
@@ -982,143 +1008,18 @@
     return false;
   }
 
-  // --- Storage helpers (mirrored from manage.js, self-contained) ---
-  // Storage moved from chrome.storage.sync to chrome.storage.local to avoid
-  // sync quotas that were silently dropping saves. Existing sync data is
-  // migrated once via __chatEnsureMigrated below.
-  let __chatMigrationPromise = null;
-  function __chatEnsureMigrated() {
-    if (__chatMigrationPromise) return __chatMigrationPromise;
-    __chatMigrationPromise = new Promise(function (resolve) {
-      try {
-        chrome.storage.local.get('__0tab_migrated_v1', function (flagRes) {
-          if (chrome.runtime.lastError || (flagRes && flagRes.__0tab_migrated_v1)) {
-            resolve(); return;
-          }
-          chrome.storage.sync.get(null, function (syncData) {
-            if (chrome.runtime.lastError || !syncData || Object.keys(syncData).length === 0) {
-              chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-              return;
-            }
-            chrome.storage.local.get(null, function (localData) {
-              let toCopy = {};
-              Object.keys(syncData).forEach(function (k) {
-                if (!(k in localData)) toCopy[k] = syncData[k];
-              });
-              if (Object.keys(toCopy).length === 0) {
-                chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-                return;
-              }
-              chrome.storage.local.set(toCopy, function () {
-                chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-              });
-            });
-          });
-        });
-      } catch (e) { resolve(); }
-    });
-    return __chatMigrationPromise;
-  }
-  __chatEnsureMigrated();
-
-  // v2 migration: rebrand from Tab0 AI → 0tab AI. Renames legacy `__ssg_*`
-  // and `__tab0_*` storage keys to `__0tab_*`. Idempotent, gated on flag.
-  const __CHAT_KEY_RENAME_MAP = {
-    '__ssg_folders': '__0tab_folders',
-    '__ssg_settings': '__0tab_settings',
-    '__ssg_trash': '__0tab_trash',
-    '__tab0_migrated_v1': '__0tab_migrated_v1',
-    '__tab0_daily_stats': '__0tab_daily_stats',
-    '__tab0_history_imported_v1': '__0tab_history_imported_v1',
-    '__tab0_history_dismissed_v1': '__0tab_history_dismissed_v1'
-  };
-  let __chatMigrationV2Promise = null;
-  function __chatEnsureMigratedV2() {
-    if (__chatMigrationV2Promise) return __chatMigrationV2Promise;
-    __chatMigrationV2Promise = __chatEnsureMigrated().then(function () {
-      return new Promise(function (resolve) {
-        try {
-          chrome.storage.local.get('__0tab_migrated_v2', function (flagRes) {
-            if (chrome.runtime.lastError || (flagRes && flagRes.__0tab_migrated_v2)) {
-              resolve(); return;
-            }
-            chrome.storage.local.get(null, function (all) {
-              if (chrome.runtime.lastError) { resolve(); return; }
-              all = all || {};
-              let writes = {};
-              let removes = [];
-              Object.keys(__CHAT_KEY_RENAME_MAP).forEach(function (oldK) {
-                let newK = __CHAT_KEY_RENAME_MAP[oldK];
-                if (oldK in all) {
-                  if (!(newK in all)) writes[newK] = all[oldK];
-                  removes.push(oldK);
-                }
-              });
-              // Order: writes → removes → flag. Set migrated_v2 ONLY after
-              // both succeeded without lastError; if either fails we resolve
-              // without flagging so the next load retries.
-              function finish() {
-                chrome.storage.local.set({ '__0tab_migrated_v2': true }, function () { resolve(); });
-              }
-              function doRemove() {
-                if (removes.length === 0) { finish(); return; }
-                chrome.storage.local.remove(removes, function () {
-                  if (chrome.runtime.lastError) { resolve(); return; }
-                  finish();
-                });
-              }
-              if (Object.keys(writes).length === 0) {
-                doRemove();
-              } else {
-                chrome.storage.local.set(writes, function () {
-                  if (chrome.runtime.lastError) { resolve(); return; }
-                  doRemove();
-                });
-              }
-            });
-          });
-        } catch (e) { resolve(); }
-      });
-    });
-    return __chatMigrationV2Promise;
-  }
-  __chatEnsureMigratedV2();
-
+  // --- Storage helpers ---
+  // Thin aliases to the shared, migration-gated wrappers in shared.js
+  // (storageGet/storageSet/storageRemove). Kept so the many existing
+  // chatStorage* call sites inside this IIFE stay untouched.
   function chatStorageGet(keys) {
-    return __chatEnsureMigratedV2().then(function () {
-      return new Promise(function (resolve, reject) {
-        chrome.storage.local.get(keys, function (result) {
-          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-          else resolve(result);
-        });
-      });
-    });
+    return storageGet(keys);
   }
   function chatStorageSet(data) {
-    return __chatEnsureMigratedV2().then(function () {
-      return new Promise(function (resolve, reject) {
-        chrome.storage.local.set(data, function () {
-          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-          else resolve();
-        });
-      });
-    });
+    return storageSet(data);
   }
   function chatStorageRemove(keys) {
-    return __chatEnsureMigratedV2().then(function () {
-      return new Promise(function (resolve, reject) {
-        chrome.storage.local.remove(keys, function () {
-          if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-          else resolve();
-        });
-      });
-    });
-  }
-
-  function chatEscapeHtml(text) {
-    let div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    return storageRemove(keys);
   }
 
   function chatGetFavicon(url) {
@@ -1155,7 +1056,7 @@
     let src = chatGetFavicon(url);
     let s = size || 16;
     let cls = cssClass ? ' class="' + cssClass + '"' : '';
-    let safeName = chatEscapeHtml(name || '?');
+    let safeName = escapeHtml(name || '?');
     return '<img src="' + src + '"' + cls + ' width="' + s + '" height="' + s + '" data-name="' + safeName + '">';
   }
 
@@ -1180,9 +1081,9 @@
     opts = opts || {};
     let fav = chatGetFavicon(item.url);
     let meta = opts.meta || (item.count !== undefined ? item.count + ' opens' : '');
-    let html = '<div class="chat-card chat-card-bookmark" data-url="' + chatEscapeHtml(item.url) + '" data-name="' + chatEscapeHtml(item.name || item.title || '') + '">';
+    let html = '<div class="chat-card chat-card-bookmark" data-url="' + escapeHtml(item.url) + '" data-name="' + escapeHtml(item.name || item.title || '') + '">';
     html += '<div class="chat-card-main"><img src="' + fav + '" class="chat-card-favicon">';
-    html += '<div class="chat-card-info"><span class="chat-card-name">' + chatEscapeHtml(item.name || item.title || '') + '</span>';
+    html += '<div class="chat-card-info"><span class="chat-card-name">' + escapeHtml(item.name || item.title || '') + '</span>';
     if (meta) html += '<span class="chat-card-meta">' + meta + '</span>';
     html += '</div></div>';
     // Inline actions
@@ -1199,9 +1100,9 @@
   }
 
   function buildFolderCard(folder) {
-    let html = '<div class="chat-card chat-card-folder" data-folder-id="' + chatEscapeHtml(folder.id || '') + '" data-folder-name="' + chatEscapeHtml(folder.path || folder.title || folder.name || '') + '">';
+    let html = '<div class="chat-card chat-card-folder" data-folder-id="' + escapeHtml(folder.id || '') + '" data-folder-name="' + escapeHtml(folder.path || folder.title || folder.name || '') + '">';
     html += '<div class="chat-card-main"><span class="chat-card-folder-icon">&#128193;</span>';
-    html += '<div class="chat-card-info"><span class="chat-card-name">' + chatEscapeHtml(folder.path || folder.title || folder.name || '') + '</span>';
+    html += '<div class="chat-card-info"><span class="chat-card-name">' + escapeHtml(folder.path || folder.title || folder.name || '') + '</span>';
     html += '<span class="chat-card-meta">' + (folder.childCount || 0) + ' items</span>';
     html += '</div></div>';
     html += '<div class="chat-card-actions">';
@@ -1229,7 +1130,7 @@
         if (!card) return;
         if (action === 'open') {
           let url = card.getAttribute('data-url');
-          if (url) chrome.tabs.create({ url: url });
+          if (url && isOpenableUrl(url)) chrome.tabs.create({ url: url });
         } else if (action === 'delete') {
           let name = card.getAttribute('data-name');
           if (name && sendMessageFn) {
@@ -1857,7 +1758,7 @@
     let html = '<div style="margin-bottom:6px;">Your top ' + sorted.length + ' most used:</div>';
     sorted.forEach(function (s) {
       let fav = chatGetFavicon(s.url);
-      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
+      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
     });
     return html;
   }
@@ -1869,7 +1770,7 @@
     let html = '<div style="margin-bottom:6px;">You have <strong>' + dead.length + '</strong> unused bookmark' + (dead.length > 1 ? 's' : '') + ':</div>';
     dead.forEach(function (s) {
       let fav = chatGetFavicon(s.url);
-      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">never opened</span></div>';
+      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">never opened</span></div>';
     });
     return html;
   }
@@ -1881,7 +1782,7 @@
     let html = '<div style="margin-bottom:6px;">Recently added:</div>';
     sorted.forEach(function (s) {
       let fav = chatGetFavicon(s.url);
-      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + chatTimeAgo(s.createdAt) + '</span></div>';
+      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + chatTimeAgo(s.createdAt) + '</span></div>';
     });
     return html;
   }
@@ -1893,7 +1794,7 @@
     let html = '<div style="margin-bottom:6px;">Recently opened:</div>';
     sorted.forEach(function (s) {
       let fav = chatGetFavicon(s.url);
-      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + chatTimeAgo(s.lastAccessed) + '</span></div>';
+      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + chatTimeAgo(s.lastAccessed) + '</span></div>';
     });
     return html;
   }
@@ -1908,7 +1809,7 @@
     if (tags.length === 0) return 'No tags found yet. Tags are auto-generated when you save bookmarks.';
     let html = '<div style="margin-bottom:6px;">You have <strong>' + tags.length + '</strong> tags:</div><div style="line-height:2;">';
     tags.forEach(function (t) {
-      html += '<span class="chat-tag-pill">' + chatEscapeHtml(t) + ' <span class="chat-tag-count">' + tagMap[t] + '</span></span>';
+      html += '<span class="chat-tag-pill">' + escapeHtml(t) + ' <span class="chat-tag-count">' + tagMap[t] + '</span></span>';
     });
     html += '</div>';
     return html;
@@ -1919,11 +1820,11 @@
     let matches = shortcuts.filter(function (s) {
       return s.tags.some(function (t) { return t.toLowerCase() === tag.toLowerCase(); });
     });
-    if (matches.length === 0) return 'No bookmarks found with the tag <strong>' + chatEscapeHtml(tag) + '</strong>. Try <em>show my tags</em> to see available tags.';
-    let html = '<div style="margin-bottom:6px;">Found <strong>' + matches.length + '</strong> bookmark' + (matches.length > 1 ? 's' : '') + ' tagged <strong>' + chatEscapeHtml(tag) + '</strong>:</div>';
+    if (matches.length === 0) return 'No bookmarks found with the tag <strong>' + escapeHtml(tag) + '</strong>. Try <em>show my tags</em> to see available tags.';
+    let html = '<div style="margin-bottom:6px;">Found <strong>' + matches.length + '</strong> bookmark' + (matches.length > 1 ? 's' : '') + ' tagged <strong>' + escapeHtml(tag) + '</strong>:</div>';
     matches.slice(0, 15).forEach(function (s) {
       let fav = chatGetFavicon(s.url);
-      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
+      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
     });
     if (matches.length > 15) html += '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">+ ' + (matches.length - 15) + ' more</div>';
     return html;
@@ -1941,19 +1842,19 @@
       let tree = await getBookmarkTree();
       let allBm = flattenBookmarks(tree);
       let bmMatches = allBm.filter(function (b) { return b.url.toLowerCase().includes(d) || b.title.toLowerCase().includes(d); });
-      if (bmMatches.length === 0) return 'No bookmarks found matching <strong>' + chatEscapeHtml(domain) + '</strong>.';
-      let html = '<div style="margin-bottom:6px;">Found <strong>' + bmMatches.length + '</strong> bookmark' + (bmMatches.length > 1 ? 's' : '') + ' matching <strong>' + chatEscapeHtml(domain) + '</strong> (in Chrome bookmarks):</div>';
+      if (bmMatches.length === 0) return 'No bookmarks found matching <strong>' + escapeHtml(domain) + '</strong>.';
+      let html = '<div style="margin-bottom:6px;">Found <strong>' + bmMatches.length + '</strong> bookmark' + (bmMatches.length > 1 ? 's' : '') + ' matching <strong>' + escapeHtml(domain) + '</strong> (in Chrome bookmarks):</div>';
       bmMatches.slice(0, 12).forEach(function (b) {
         let fav = chatGetFavicon(b.url);
-        html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(b.title || b.url) + '</span></div>';
+        html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(b.title || b.url) + '</span></div>';
       });
       if (bmMatches.length > 12) html += '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">+ ' + (bmMatches.length - 12) + ' more</div>';
       return html;
     }
-    let html = '<div style="margin-bottom:6px;">Found <strong>' + matches.length + '</strong> shortcut' + (matches.length > 1 ? 's' : '') + ' matching <strong>' + chatEscapeHtml(domain) + '</strong>:</div>';
+    let html = '<div style="margin-bottom:6px;">Found <strong>' + matches.length + '</strong> shortcut' + (matches.length > 1 ? 's' : '') + ' matching <strong>' + escapeHtml(domain) + '</strong>:</div>';
     matches.slice(0, 12).forEach(function (s) {
       let fav = chatGetFavicon(s.url);
-      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
+      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
     });
     if (matches.length > 12) html += '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">+ ' + (matches.length - 12) + ' more</div>';
     return html;
@@ -1965,7 +1866,7 @@
     let fn = folderName.toLowerCase();
     let match = folders.find(function (f) { return f.title.toLowerCase() === fn; }) ||
                 folders.find(function (f) { return f.title.toLowerCase().includes(fn); });
-    if (!match) return 'Could not find a folder matching <strong>' + chatEscapeHtml(folderName) + '</strong>. Your folders are: ' + folders.map(function (f) { return '<strong>' + chatEscapeHtml(f.title) + '</strong>'; }).join(', ') + '.';
+    if (!match) return 'Could not find a folder matching <strong>' + escapeHtml(folderName) + '</strong>. Your folders are: ' + folders.map(function (f) { return '<strong>' + escapeHtml(f.title) + '</strong>'; }).join(', ') + '.';
 
     // Get folder subtree
     let subtree = await new Promise(function (resolve) {
@@ -1981,14 +1882,14 @@
         else if (c.children) items.push({ title: c.title, type: 'folder', count: c.children.length });
       });
     }
-    if (items.length === 0) return 'The folder <strong>' + chatEscapeHtml(match.title) + '</strong> is empty.';
-    let html = '<div style="margin-bottom:6px;"><strong>' + chatEscapeHtml(match.title) + '</strong> contains ' + items.length + ' item' + (items.length > 1 ? 's' : '') + ':</div>';
+    if (items.length === 0) return 'The folder <strong>' + escapeHtml(match.title) + '</strong> is empty.';
+    let html = '<div style="margin-bottom:6px;"><strong>' + escapeHtml(match.title) + '</strong> contains ' + items.length + ' item' + (items.length > 1 ? 's' : '') + ':</div>';
     items.forEach(function (item) {
       if (item.type === 'folder') {
-        html += '<div class="chat-list-item"><span style="font-size:14px;">&#128193;</span><span class="chat-list-name">' + chatEscapeHtml(item.title) + '</span><span class="chat-list-meta">' + item.count + ' items</span></div>';
+        html += '<div class="chat-list-item"><span style="font-size:14px;">&#128193;</span><span class="chat-list-name">' + escapeHtml(item.title) + '</span><span class="chat-list-meta">' + item.count + ' items</span></div>';
       } else {
         let fav = chatGetFavicon(item.url);
-        html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(item.title) + '</span></div>';
+        html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(item.title) + '</span></div>';
       }
     });
     return html;
@@ -2041,8 +1942,8 @@
         rememberListResults(shortcuts);
         shortcuts.forEach(function (s) {
           let fav = chatGetFavicon(s.url);
-          let tags = s.tags.length > 0 ? ' <span style="font-size:11px;color:var(--text-muted);">' + s.tags.map(function (t) { return '#' + chatEscapeHtml(t); }).join(' ') + '</span>' : '';
-          html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens' + tags + '</span></div>';
+          let tags = s.tags.length > 0 ? ' <span style="font-size:11px;color:var(--text-muted);">' + s.tags.map(function (t) { return '#' + escapeHtml(t); }).join(' ') + '</span>' : '';
+          html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens' + tags + '</span></div>';
         });
       }
     }
@@ -2063,8 +1964,8 @@
         let showLimit = 50;
         bookmarks.slice(0, showLimit).forEach(function (b) {
           let fav = chatGetFavicon(b.url);
-          let folderLabel = b.folder ? ' <span style="font-size:11px;color:var(--text-muted);">' + chatEscapeHtml(b.folder) + '</span>' : '';
-          html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(b.title || b.url) + '</span><span class="chat-list-meta">' + folderLabel + '</span></div>';
+          let folderLabel = b.folder ? ' <span style="font-size:11px;color:var(--text-muted);">' + escapeHtml(b.folder) + '</span>' : '';
+          html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(b.title || b.url) + '</span><span class="chat-list-meta">' + folderLabel + '</span></div>';
         });
         if (bookmarks.length > showLimit) {
           html += '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">+ ' + (bookmarks.length - showLimit) + ' more bookmarks. Try filtering by tag, domain, or folder for specific results.</div>';
@@ -2101,7 +2002,7 @@
           html += '<div style="margin-bottom:6px;">Found <strong>' + matches.length + '</strong> shortcut' + (matches.length > 1 ? 's' : '') + ':</div>';
           matches.forEach(function (s) {
             let fav = chatGetFavicon(s.url);
-            html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
+            html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
           });
           html += '<div style="margin:8px 0 6px;font-size:12px;color:var(--text-secondary);">Also found in Chrome bookmarks:</div>';
         } else {
@@ -2109,7 +2010,7 @@
         }
         bmMatches.slice(0, 8).forEach(function (b) {
           let fav = chatGetFavicon(b.url);
-          html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(b.title || b.url) + '</span></div>';
+          html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(b.title || b.url) + '</span></div>';
         });
         return html;
       }
@@ -2129,7 +2030,7 @@
     let html = '<div style="margin-bottom:6px;">Found <strong>' + matches.length + '</strong> match' + (matches.length > 1 ? 'es' : '') + ':</div>';
     matches.slice(0, 10).forEach(function (s) {
       let fav = chatGetFavicon(s.url);
-      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
+      html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
     });
     if (matches.length > 10) html += '<div style="font-size:11px;color:var(--text-muted);margin-top:4px;">+ ' + (matches.length - 10) + ' more</div>';
     return html;
@@ -2152,7 +2053,7 @@
       if (statusText) statusText.textContent = enable ? '(Available)' : '(Disabled)';
       return 'AI features have been <strong>' + (enable ? 'enabled' : 'disabled') + '</strong>.' + (enable ? ' 0tab AI will now use Gemini Nano for smarter suggestions.' : '');
     } catch (e) {
-      return 'Failed to update AI settings: ' + chatEscapeHtml(e.message);
+      return 'Failed to update AI settings: ' + escapeHtml(e.message);
     }
   }
 
@@ -2166,7 +2067,7 @@
       if (toggle) toggle.checked = enable;
       return 'Bookmark sync has been <strong>' + (enable ? 'enabled' : 'disabled') + '</strong>.';
     } catch (e) {
-      return 'Failed to update sync settings: ' + chatEscapeHtml(e.message);
+      return 'Failed to update sync settings: ' + escapeHtml(e.message);
     }
   }
 
@@ -2184,9 +2085,9 @@
           if (subTabBtn) subTabBtn.click();
         }, 100);
       }
-      return 'Switched to the <strong>' + chatEscapeHtml(section) + '</strong> section.';
+      return 'Switched to the <strong>' + escapeHtml(section) + '</strong> section.';
     }
-    return 'I couldn\'t find the <strong>' + chatEscapeHtml(section) + '</strong> section. Available sections: bookmarks, shortcuts, statistics, settings.';
+    return 'I couldn\'t find the <strong>' + escapeHtml(section) + '</strong> section. Available sections: bookmarks, shortcuts, statistics, settings.';
   }
 
   async function handleExport() {
@@ -2204,12 +2105,12 @@
       let blob = new Blob([csv], { type: 'text/csv' });
       let link = document.createElement('a');
       link.href = URL.createObjectURL(blob);
-      link.download = 'tab0-shortcuts-' + new Date().toISOString().split('T')[0] + '.csv';
+      link.download = '0tab-shortcuts-' + new Date().toISOString().split('T')[0] + '.csv';
       link.click();
       URL.revokeObjectURL(link.href);
       return 'Exported <strong>' + shortcuts.length + '</strong> shortcuts as CSV. Check your downloads!';
     } catch (e) {
-      return 'Export failed: ' + chatEscapeHtml(e.message);
+      return 'Export failed: ' + escapeHtml(e.message);
     }
   }
 
@@ -2244,26 +2145,26 @@
     let html = '<div style="margin-bottom:6px;">Found <strong>' + totalDupes + '</strong> duplicate URL' + (totalDupes > 1 ? 's' : '') + ':</div>';
 
     if (shortcutDupes.length > 0) {
-      html += '<div style="margin-bottom:4px;font-size:11px;font-weight:600;color:var(--accent-primary);">Duplicate shortcuts:</div>';
+      html += '<div style="margin-bottom:4px;font-size:11px;font-weight:600;color:var(--accent);">Duplicate shortcuts:</div>';
       shortcutDupes.slice(0, 10).forEach(function (u) {
         let names = shortcutUrlMap[u];
         html += '<div class="chat-list-item" style="flex-direction:column;align-items:flex-start;gap:2px;">';
-        html += '<span style="font-size:11px;color:var(--text-muted);word-break:break-all;">' + chatEscapeHtml(u.length > 60 ? u.substring(0, 60) + '...' : u) + '</span>';
+        html += '<span style="font-size:11px;color:var(--text-muted);word-break:break-all;">' + escapeHtml(u.length > 60 ? u.substring(0, 60) + '...' : u) + '</span>';
         names.forEach(function (n) {
-          html += '<span style="font-size:12px;"><strong>' + chatEscapeHtml(n) + '</strong></span>';
+          html += '<span style="font-size:12px;"><strong>' + escapeHtml(n) + '</strong></span>';
         });
         html += '</div>';
       });
     }
 
     if (bmDupes.length > 0) {
-      html += '<div style="margin:8px 0 4px;font-size:11px;font-weight:600;color:var(--accent-primary);">Duplicate bookmarks:</div>';
+      html += '<div style="margin:8px 0 4px;font-size:11px;font-weight:600;color:var(--accent);">Duplicate bookmarks:</div>';
       bmDupes.slice(0, 10).forEach(function (u) {
         let titles = bmUrlMap[u];
         html += '<div class="chat-list-item" style="flex-direction:column;align-items:flex-start;gap:2px;">';
-        html += '<span style="font-size:11px;color:var(--text-muted);word-break:break-all;">' + chatEscapeHtml(u.length > 60 ? u.substring(0, 60) + '...' : u) + '</span>';
+        html += '<span style="font-size:11px;color:var(--text-muted);word-break:break-all;">' + escapeHtml(u.length > 60 ? u.substring(0, 60) + '...' : u) + '</span>';
         titles.forEach(function (t) {
-          html += '<span style="font-size:12px;">' + chatEscapeHtml(t) + '</span>';
+          html += '<span style="font-size:12px;">' + escapeHtml(t) + '</span>';
         });
         html += '</div>';
       });
@@ -2280,7 +2181,7 @@
     if (folders.length === 0) return 'No bookmark folders found.';
     let html = '<div style="margin-bottom:6px;"><strong>' + folders.length + '</strong> bookmark folders:</div>';
     folders.forEach(function (f) {
-      html += '<div class="chat-list-item"><span class="chat-list-name" style="font-weight:500;">' + chatEscapeHtml(f.path || f.title) + '</span><span class="chat-list-meta">' + f.childCount + ' items</span></div>';
+      html += '<div class="chat-list-item"><span class="chat-list-name" style="font-weight:500;">' + escapeHtml(f.path || f.title) + '</span><span class="chat-list-meta">' + f.childCount + ' items</span></div>';
     });
     return html;
   }
@@ -2305,7 +2206,7 @@
       let meta = isFolder
         ? ((item.urls ? item.urls.length : 0) + ' tabs &middot; deleted ' + chatTimeAgo(item.deletedAt))
         : ('deleted ' + chatTimeAgo(item.deletedAt));
-      html += '<div class="chat-list-item">' + icon + '<span class="chat-list-name">' + chatEscapeHtml(item.name) + '</span><span class="chat-list-meta">' + meta + '</span></div>';
+      html += '<div class="chat-list-item">' + icon + '<span class="chat-list-name">' + escapeHtml(item.name) + '</span><span class="chat-list-meta">' + meta + '</span></div>';
     });
     html += '<div style="margin-top:8px;font-size:12px;">To restore items, go to <strong>Settings > Trash</strong>.</div>';
     return {
@@ -2377,7 +2278,7 @@
       let folders = flattenFolders(tree);
       folders.forEach(function (f) {
         let selected = f.title === 'Bookmarks bar' ? ' selected' : '';
-        folderOptions += '<option value="' + f.id + '"' + selected + '>' + chatEscapeHtml(f.path || f.title) + '</option>';
+        folderOptions += '<option value="' + f.id + '"' + selected + '>' + escapeHtml(f.path || f.title) + '</option>';
       });
     } catch (e) {}
 
@@ -2385,7 +2286,7 @@
     actionArea.classList.remove('hidden');
     actionArea.innerHTML =
       '<label>URL</label>' +
-      '<input type="text" id="chatSaveUrl" placeholder="https://example.com or www.example.com" value="' + chatEscapeHtml(prefillUrl || '') + '">' +
+      '<input type="text" id="chatSaveUrl" placeholder="https://example.com or www.example.com" value="' + escapeHtml(prefillUrl || '') + '">' +
       '<label>Bookmark name</label>' +
       '<input type="text" id="chatSaveBookmarkTitle" placeholder="Auto-filled from URL">' +
       '<label>0tab Shortcut</label>' +
@@ -2421,6 +2322,8 @@
     document.getElementById('chatSaveUrl').addEventListener('keydown', function (e) {
       if (e.key === 'Enter') { e.preventDefault(); chatAutoFillFromUrl(); document.getElementById('chatSaveBookmarkTitle').focus(); }
     });
+    // Shortcut names can't contain spaces — Space types '-'
+    enforceShortcutNameInput(document.getElementById('chatSaveName'));
     // If URL was prefilled, auto-fill immediately
     if (prefillUrl) chatAutoFillFromUrl();
 
@@ -2455,14 +2358,14 @@
           } catch (bmErr) {
             // Shortcut saved, but Chrome bookmark creation failed — tell the user.
             console.warn('0tab: chat bookmark create failed:', bmErr && bmErr.message);
-            addMessage('bot', 'Saved the shortcut, but could not add it to your bookmark folder: ' + chatEscapeHtml(bmErr && bmErr.message || 'unknown error'));
+            addMessage('bot', 'Saved the shortcut, but could not add it to your bookmark folder: ' + escapeHtml(bmErr && bmErr.message || 'unknown error'));
           }
         }
         actionArea.classList.add('hidden');
         actionArea.innerHTML = '';
-        let msg = 'Saved <strong>' + chatEscapeHtml(name) + '</strong> as a shortcut!';
+        let msg = 'Saved <strong>' + escapeHtml(name) + '</strong> as a shortcut!';
         if (folderId) msg += ' Also added to your bookmark folder.';
-        msg += ' Open it with <code>0</code> + <code>Tab</code> + <code>' + chatEscapeHtml(name) + '</code>.';
+        msg += ' Open it with <code>0</code> + <code>Tab</code> + <code>' + escapeHtml(name) + '</code>.';
         addMessage('bot', msg, [
           { label: 'Open ' + name, query: 'Open ' + name },
           { label: 'Save another', query: 'Save a bookmark' },
@@ -2471,7 +2374,7 @@
         if (typeof loadShortcutsTable === 'function') loadShortcutsTable();
         if (typeof loadBookmarksView === 'function') loadBookmarksView();
       } catch (e) {
-        addMessage('bot', 'Failed to save: ' + chatEscapeHtml(e.message));
+        addMessage('bot', 'Failed to save: ' + escapeHtml(e.message));
       }
     });
     return 'Paste a URL below and I\'ll auto-fill the rest for you:';
@@ -2523,10 +2426,10 @@
       // Refresh bookmarks view if active
       if (typeof loadBookmarksView === 'function') loadBookmarksView();
       if (typeof loadShortcutsTable === 'function') loadShortcutsTable();
-      let scMsg = shortcutKey ? ' 0tab shortcut <strong>' + chatEscapeHtml(shortcutKey) + '</strong> also created.' : '';
-      return 'Created folder <strong>' + chatEscapeHtml(folderName) + '</strong> in Bookmarks bar!' + scMsg;
+      let scMsg = shortcutKey ? ' 0tab shortcut <strong>' + escapeHtml(shortcutKey) + '</strong> also created.' : '';
+      return 'Created folder <strong>' + escapeHtml(folderName) + '</strong> in Bookmarks bar!' + scMsg;
     } catch (e) {
-      return 'Failed to create folder: ' + chatEscapeHtml(e.message);
+      return 'Failed to create folder: ' + escapeHtml(e.message);
     }
   }
 
@@ -2536,8 +2439,11 @@
     // 1. Check if it's a URL — just open it directly
     if (/^https?:\/\//i.test(target) || /^www\./i.test(target) || /^[\w.-]+\.[a-z]{2,}/i.test(target)) {
       let url = chatNormalizeUrl(target);
+      if (!isOpenableUrl(url)) {
+        return 'That URL cannot be opened (unsupported scheme).';
+      }
       chrome.tabs.create({ url: url });
-      return 'Opening <strong>' + chatEscapeHtml(url) + '</strong>...';
+      return 'Opening <strong>' + escapeHtml(url) + '</strong>...';
     }
 
     let shortcuts = await getAllShortcuts();
@@ -2586,15 +2492,15 @@
       } catch (e) {}
 
       if (folderBookmarks.length === 0) {
-        return 'Folder <strong>' + chatEscapeHtml(folderMatch.title) + '</strong> is empty.';
+        return 'Folder <strong>' + escapeHtml(folderMatch.title) + '</strong> is empty.';
       }
 
       // Show folder contents and ask
-      let html = 'Found folder <strong>' + chatEscapeHtml(folderMatch.title) + '</strong> with ' + folderBookmarks.length + ' bookmark' + (folderBookmarks.length > 1 ? 's' : '') + ':';
+      let html = 'Found folder <strong>' + escapeHtml(folderMatch.title) + '</strong> with ' + folderBookmarks.length + ' bookmark' + (folderBookmarks.length > 1 ? 's' : '') + ':';
       html += '<div style="margin:6px 0;">';
       folderBookmarks.slice(0, 8).forEach(function (b) {
         let fav = chatGetFavicon(b.url);
-        html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(b.title || b.url) + '</span></div>';
+        html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(b.title || b.url) + '</span></div>';
       });
       if (folderBookmarks.length > 8) html += '<div style="font-size:11px;color:var(--text-muted);">+ ' + (folderBookmarks.length - 8) + ' more</div>';
       html += '</div>';
@@ -2613,20 +2519,21 @@
     if (match) {
       rememberShortcut(match);
       if (match.type === 'folder' && match.urls && match.urls.length > 0) {
-        match.urls.forEach(function (u) { chrome.tabs.create({ url: u }); });
-        return 'Opened all ' + match.urls.length + ' bookmarks from folder <strong>' + chatEscapeHtml(match.name) + '</strong>.';
+        let safeUrls = match.urls.filter(isOpenableUrl);
+        safeUrls.forEach(function (u) { chrome.tabs.create({ url: u }); });
+        return 'Opened all ' + safeUrls.length + ' bookmarks from folder <strong>' + escapeHtml(match.name) + '</strong>.';
       }
-      if (match.url) {
+      if (match.url && isOpenableUrl(match.url)) {
         chrome.tabs.create({ url: match.url });
-        return 'Opening <strong>' + chatEscapeHtml(match.bookmarkTitle || match.name) + '</strong>...';
+        return 'Opening <strong>' + escapeHtml(match.bookmarkTitle || match.name) + '</strong>...';
       }
     }
 
     // Handle Chrome bookmark match
-    if (chromeBmMatch) {
+    if (chromeBmMatch && isOpenableUrl(chromeBmMatch.url)) {
       rememberShortcut({ name: chromeBmMatch.title, url: chromeBmMatch.url });
       chrome.tabs.create({ url: chromeBmMatch.url });
-      return 'Opening <strong>' + chatEscapeHtml(chromeBmMatch.title) + '</strong>...';
+      return 'Opening <strong>' + escapeHtml(chromeBmMatch.title) + '</strong>...';
     }
 
     // Nothing found
@@ -2636,7 +2543,7 @@
     });
     suggestOptions.push({ label: 'List all bookmarks', query: 'List all my bookmarks' });
     return {
-      text: 'Could not find <strong>' + chatEscapeHtml(target) + '</strong> in your shortcuts, bookmarks, or folders.',
+      text: 'Could not find <strong>' + escapeHtml(target) + '</strong> in your shortcuts, bookmarks, or folders.',
       options: suggestOptions
     };
   }
@@ -2647,18 +2554,24 @@
     let t = name.toLowerCase();
     let match = shortcuts.find(function (s) { return s.name.toLowerCase() === t; }) ||
                 shortcuts.find(function (s) { return s.name.toLowerCase().includes(t); });
-    if (!match) return 'Could not find a shortcut matching <strong>' + chatEscapeHtml(name) + '</strong>.';
+    if (!match) return 'Could not find a shortcut matching <strong>' + escapeHtml(name) + '</strong>.';
 
     // Show confirmation in action area
     let actionArea = document.getElementById('chatActionArea');
     actionArea.classList.remove('hidden');
     actionArea.innerHTML =
-      '<div style="font-size:13px;margin-bottom:8px;">Are you sure you want to delete <strong>' + chatEscapeHtml(match.name) + '</strong>?</div>' +
+      '<div style="font-size:13px;margin-bottom:8px;">Are you sure you want to delete <strong>' + escapeHtml(match.name) + '</strong>?</div>' +
       '<div class="chat-action-btns">' +
       '<button id="chatDeleteCancel">Cancel</button>' +
       '<button id="chatDeleteConfirm" class="chat-action-primary" style="background:var(--danger);border-color:var(--danger);">Delete</button>' +
       '</div>';
 
+    // This promise parks until the user clicks Cancel/Delete. Stop the
+    // typing dots and release the send guard so the chat stays usable
+    // while the confirm form shows — sending a new message clears the
+    // form (chatActionArea), which simply abandons this pending confirm.
+    hideTyping();
+    _chatSending = false;
     return new Promise(function (resolve) {
       document.getElementById('chatDeleteCancel').addEventListener('click', function () {
         actionArea.classList.add('hidden');
@@ -2699,10 +2612,10 @@
             });
             await chatStorageSet(restoreData);
             if (typeof loadShortcutsTable === 'function') loadShortcutsTable();
-            return 'Restored <strong>' + chatEscapeHtml(s.name) + '</strong>.';
+            return 'Restored <strong>' + escapeHtml(s.name) + '</strong>.';
           });
           resolve({
-            text: 'Deleted <strong>' + chatEscapeHtml(match.name) + '</strong>. Say <em>undo</em> to restore.',
+            text: 'Deleted <strong>' + escapeHtml(match.name) + '</strong>. Say <em>undo</em> to restore.',
             options: [
               { label: 'Undo', query: 'undo' },
               { label: 'Show my shortcuts', query: 'List all my shortcuts' },
@@ -2710,7 +2623,7 @@
             ]
           });
         } catch (e) {
-          resolve('Failed to delete: ' + chatEscapeHtml(e.message));
+          resolve('Failed to delete: ' + escapeHtml(e.message));
         }
       });
     });
@@ -2722,7 +2635,7 @@
 
   async function handleMoveByDomain(domain, folderName) {
     if (!domain) return 'Which domain should I look for? Say something like <em>move zoho.com bookmarks to Zoho folder</em>.';
-    if (!folderName) return 'Which folder should I move them to? Say something like <em>move ' + chatEscapeHtml(domain) + ' bookmarks to Work</em>.';
+    if (!folderName) return 'Which folder should I move them to? Say something like <em>move ' + escapeHtml(domain) + ' bookmarks to Work</em>.';
 
     let shortcuts = await getAllShortcuts();
     let tree = await getBookmarkTree();
@@ -2761,19 +2674,19 @@
     });
 
     if (allMatches.length === 0) {
-      return 'I couldn\'t find any bookmarks or shortcuts matching <strong>' + chatEscapeHtml(domain) + '</strong>. Check the domain name and try again.';
+      return 'I couldn\'t find any bookmarks or shortcuts matching <strong>' + escapeHtml(domain) + '</strong>. Check the domain name and try again.';
     }
 
     // Show matches and ask for confirmation
-    let listHtml = '<div style="margin-bottom:8px;">Found <strong>' + allMatches.length + '</strong> item' + (allMatches.length > 1 ? 's' : '') + ' matching <strong>' + chatEscapeHtml(domain) + '</strong>:</div>';
+    let listHtml = '<div style="margin-bottom:8px;">Found <strong>' + allMatches.length + '</strong> item' + (allMatches.length > 1 ? 's' : '') + ' matching <strong>' + escapeHtml(domain) + '</strong>:</div>';
     allMatches.slice(0, 15).forEach(function (m) {
       let fav = chatGetFavicon(m.url);
-      listHtml += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(m.title || m.url) + '</span></div>';
+      listHtml += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(m.title || m.url) + '</span></div>';
     });
     if (allMatches.length > 15) {
       listHtml += '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">...and ' + (allMatches.length - 15) + ' more</div>';
     }
-    listHtml += '<div style="margin-top:8px;">Move them all to folder <strong>' + chatEscapeHtml(folderName) + '</strong>?</div>';
+    listHtml += '<div style="margin-top:8px;">Move them all to folder <strong>' + escapeHtml(folderName) + '</strong>?</div>';
 
     conversationState.mode = 'awaiting_confirm';
     conversationState.pendingAction = async function () {
@@ -2827,12 +2740,12 @@
         if (typeof loadBookmarksView === 'function') loadBookmarksView();
 
         let msg = 'Done! ';
-        if (movedCount > 0) msg += 'Moved <strong>' + movedCount + '</strong> bookmark' + (movedCount > 1 ? 's' : '') + ' to <strong>' + chatEscapeHtml(folderName) + '</strong>. ';
-        if (createdCount > 0) msg += 'Created <strong>' + createdCount + '</strong> new bookmark' + (createdCount > 1 ? 's' : '') + ' in <strong>' + chatEscapeHtml(folderName) + '</strong>. ';
+        if (movedCount > 0) msg += 'Moved <strong>' + movedCount + '</strong> bookmark' + (movedCount > 1 ? 's' : '') + ' to <strong>' + escapeHtml(folderName) + '</strong>. ';
+        if (createdCount > 0) msg += 'Created <strong>' + createdCount + '</strong> new bookmark' + (createdCount > 1 ? 's' : '') + ' in <strong>' + escapeHtml(folderName) + '</strong>. ';
         if (!targetFolder) msg += '(New folder created)';
         return msg;
       } catch (e) {
-        return 'Something went wrong while moving bookmarks: ' + chatEscapeHtml(e.message);
+        return 'Something went wrong while moving bookmarks: ' + escapeHtml(e.message);
       }
     };
     conversationState.pendingCancel = function () { return 'No problem, cancelled the move.'; };
@@ -2848,7 +2761,7 @@
 
   async function handleMoveByTag(tag, folderName) {
     if (!tag) return 'Which tag should I look for? Say something like <em>move shortcuts tagged work to Work folder</em>.';
-    if (!folderName) return 'Which folder should I move them to? Say something like <em>move shortcuts tagged ' + chatEscapeHtml(tag) + ' to Work</em>.';
+    if (!folderName) return 'Which folder should I move them to? Say something like <em>move shortcuts tagged ' + escapeHtml(tag) + ' to Work</em>.';
 
     let shortcuts = await getAllShortcuts();
     let tagClean = tag.toLowerCase().trim();
@@ -2865,18 +2778,18 @@
     }
 
     if (matching.length === 0) {
-      return 'I couldn\'t find any shortcuts tagged <strong>' + chatEscapeHtml(tag) + '</strong>. Use <em>show tags</em> to see available tags.';
+      return 'I couldn\'t find any shortcuts tagged <strong>' + escapeHtml(tag) + '</strong>. Use <em>show tags</em> to see available tags.';
     }
 
-    let listHtml = '<div style="margin-bottom:8px;">Found <strong>' + matching.length + '</strong> shortcut' + (matching.length > 1 ? 's' : '') + ' tagged <strong>' + chatEscapeHtml(tag) + '</strong>:</div>';
+    let listHtml = '<div style="margin-bottom:8px;">Found <strong>' + matching.length + '</strong> shortcut' + (matching.length > 1 ? 's' : '') + ' tagged <strong>' + escapeHtml(tag) + '</strong>:</div>';
     matching.slice(0, 15).forEach(function (s) {
       let fav = chatGetFavicon(s.url);
-      listHtml += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.tags.join(', ') + '</span></div>';
+      listHtml += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.tags.map(function (t) { return escapeHtml(t); }).join(', ') + '</span></div>';
     });
     if (matching.length > 15) {
       listHtml += '<div style="font-size:12px;color:var(--text-secondary);margin-top:4px;">...and ' + (matching.length - 15) + ' more</div>';
     }
-    listHtml += '<div style="margin-top:8px;">Move them all to folder <strong>' + chatEscapeHtml(folderName) + '</strong>?</div>';
+    listHtml += '<div style="margin-top:8px;">Move them all to folder <strong>' + escapeHtml(folderName) + '</strong>?</div>';
 
     conversationState.mode = 'awaiting_confirm';
     conversationState.pendingAction = async function () {
@@ -2931,10 +2844,10 @@
         let msg = 'Done! ';
         if (movedCount > 0) msg += 'Moved <strong>' + movedCount + '</strong> bookmark' + (movedCount > 1 ? 's' : '') + '. ';
         if (createdCount > 0) msg += 'Created <strong>' + createdCount + '</strong> new bookmark' + (createdCount > 1 ? 's' : '') + '. ';
-        msg += 'All in <strong>' + chatEscapeHtml(folderName) + '</strong>.' + (!targetFolder ? ' (New folder created)' : '');
+        msg += 'All in <strong>' + escapeHtml(folderName) + '</strong>.' + (!targetFolder ? ' (New folder created)' : '');
         return msg;
       } catch (e) {
-        return 'Something went wrong: ' + chatEscapeHtml(e.message);
+        return 'Something went wrong: ' + escapeHtml(e.message);
       }
     };
     conversationState.pendingCancel = function () { return 'No problem, cancelled the move.'; };
@@ -2960,12 +2873,12 @@
     if (!targetFolder) targetFolder = folders.find(function (f) { return f.title.toLowerCase().includes(folderClean); });
 
     if (!targetFolder) {
-      let suggestions = folders.slice(0, 5).map(function (f) { return '<strong>' + chatEscapeHtml(f.title) + '</strong>'; }).join(', ');
-      return 'I couldn\'t find a folder called <strong>' + chatEscapeHtml(folderName) + '</strong>.' + (suggestions ? ' Your folders: ' + suggestions : '');
+      let suggestions = folders.slice(0, 5).map(function (f) { return '<strong>' + escapeHtml(f.title) + '</strong>'; }).join(', ');
+      return 'I couldn\'t find a folder called <strong>' + escapeHtml(folderName) + '</strong>.' + (suggestions ? ' Your folders: ' + suggestions : '');
     }
 
     // Show folder contents
-    let contentsHtml = '<div style="margin-bottom:8px;">Folder <strong>' + chatEscapeHtml(targetFolder.title) + '</strong> contains <strong>' + targetFolder.childCount + '</strong> item' + (targetFolder.childCount !== 1 ? 's' : '') + '.</div>';
+    let contentsHtml = '<div style="margin-bottom:8px;">Folder <strong>' + escapeHtml(targetFolder.title) + '</strong> contains <strong>' + targetFolder.childCount + '</strong> item' + (targetFolder.childCount !== 1 ? 's' : '') + '.</div>';
 
     if (targetFolder.childCount > 0) {
       // Get the actual children
@@ -2987,9 +2900,9 @@
       children.slice(0, 10).forEach(function (c) {
         if (c.url) {
           let fav = chatGetFavicon(c.url);
-          contentsHtml += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(c.title || c.url) + '</span></div>';
+          contentsHtml += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(c.title || c.url) + '</span></div>';
         } else {
-          contentsHtml += '<div class="chat-list-item"><span style="margin-right:6px;">📁</span><span class="chat-list-name">' + chatEscapeHtml(c.title) + '</span></div>';
+          contentsHtml += '<div class="chat-list-item"><span style="margin-right:6px;">📁</span><span class="chat-list-name">' + escapeHtml(c.title) + '</span></div>';
         }
       });
       if (children.length > 10) {
@@ -3020,9 +2933,9 @@
           });
         });
         if (typeof loadBookmarksView === 'function') loadBookmarksView();
-        return 'Deleted folder <strong>' + chatEscapeHtml(targetFolder.title) + '</strong> and all its contents. You can find it in trash.';
+        return 'Deleted folder <strong>' + escapeHtml(targetFolder.title) + '</strong> and all its contents. You can find it in trash.';
       } catch (e) {
-        return 'Failed to delete folder: ' + chatEscapeHtml(e.message);
+        return 'Failed to delete folder: ' + escapeHtml(e.message);
       }
     };
     conversationState.pendingCancel = function () { return 'Good call, the folder is safe!'; };
@@ -3047,7 +2960,7 @@
       let newName = toMatch[2].trim();
       let match = shortcuts.find(function (s) { return s.name.toLowerCase() === oldName; }) ||
                   shortcuts.find(function (s) { return s.name.toLowerCase().includes(oldName); });
-      if (!match) return 'Could not find a shortcut matching <strong>' + chatEscapeHtml(toMatch[1].trim()) + '</strong>.';
+      if (!match) return 'Could not find a shortcut matching <strong>' + escapeHtml(toMatch[1].trim()) + '</strong>.';
 
       conversationState.mode = 'awaiting_confirm';
       conversationState.pendingAction = async function () {
@@ -3057,11 +2970,11 @@
         await chatStorageSet(data);
         try { await chatStorageRemove(match.name); } catch (e) { /* ignore */ }
         if (typeof loadShortcutsTable === 'function') loadShortcutsTable();
-        return 'Renamed <strong>' + chatEscapeHtml(match.name) + '</strong> to <strong>' + chatEscapeHtml(newName) + '</strong>!';
+        return 'Renamed <strong>' + escapeHtml(match.name) + '</strong> to <strong>' + escapeHtml(newName) + '</strong>!';
       };
 
       return {
-        text: 'Rename <strong>' + chatEscapeHtml(match.name) + '</strong> to <strong>' + chatEscapeHtml(newName) + '</strong>?',
+        text: 'Rename <strong>' + escapeHtml(match.name) + '</strong> to <strong>' + escapeHtml(newName) + '</strong>?',
         options: [
           { label: 'Yes, rename', query: 'Yes' },
           { label: 'Cancel', query: 'No' }
@@ -3072,7 +2985,7 @@
     // Only got target name, ask for new name
     let match = shortcuts.find(function (s) { return s.name.toLowerCase() === t; }) ||
                 shortcuts.find(function (s) { return s.name.toLowerCase().includes(t); });
-    if (!match) return 'Could not find a shortcut matching <strong>' + chatEscapeHtml(target) + '</strong>.';
+    if (!match) return 'Could not find a shortcut matching <strong>' + escapeHtml(target) + '</strong>.';
 
     conversationState.mode = 'awaiting_input';
     conversationState.pendingAction = async function (newName) {
@@ -3083,10 +2996,10 @@
       await chatStorageSet(data);
       try { await chatStorageRemove(match.name); } catch (e) { /* ignore */ }
       if (typeof loadShortcutsTable === 'function') loadShortcutsTable();
-      return 'Renamed <strong>' + chatEscapeHtml(match.name) + '</strong> to <strong>' + chatEscapeHtml(newName) + '</strong>!';
+      return 'Renamed <strong>' + escapeHtml(match.name) + '</strong> to <strong>' + escapeHtml(newName) + '</strong>!';
     };
 
-    return 'What would you like to rename <strong>' + chatEscapeHtml(match.name) + '</strong> to?';
+    return 'What would you like to rename <strong>' + escapeHtml(match.name) + '</strong> to?';
   }
 
   // ============================================================
@@ -3125,11 +3038,23 @@
   }
 
   // ============================================================
-  // AI STATUS PILL — small dot in chat header reflecting Gemini Nano state
-  // green  = ready
-  // yellow = available but model needs download
-  // gray   = unavailable / disabled (clickable → opens settings)
+  // AI STATUS PILL — small dot in chat header reflecting the active provider
+  // green = ChatGPT ready · blue = Gemini Nano ready
+  // yellow = model needs download · gray = off / unavailable
+  // Hover shows provider + model; click toggles AI on/off when possible.
   // ============================================================
+  function aiModelLabel(model) {
+    let labels = {
+      'gpt-4o-mini': 'GPT-4o mini',
+      'gpt-4o': 'GPT-4o',
+      'gpt-5.4-nano': 'GPT-5.4 nano',
+      'gpt-5.4-mini': 'GPT-5.4 mini',
+      'gpt-5.4': 'GPT-5.4',
+      'gemini-nano': 'Gemini Nano (on-device)'
+    };
+    return labels[model] || model || '';
+  }
+
   function updateAiStatusPill() {
     let pill = document.getElementById('chatAiStatus');
     if (!pill) return;
@@ -3141,29 +3066,37 @@
       let s = (settings && settings['__0tab_settings']) || {};
       let enabled = s.aiEnabled === true;
 
-      function applyState(stateClass, text, title, clickable) {
+      // mode: 'toggle' → click flips aiEnabled; 'settings' → click opens
+      // the Settings AI section; '' → not clickable.
+      function applyState(stateClass, text, title, mode) {
         pill.className = 'chat-ai-status ' + stateClass;
         if (label) label.textContent = text;
         pill.setAttribute('title', title);
-        if (clickable) pill.setAttribute('data-clickable', 'true');
+        if (mode) pill.setAttribute('data-clickable', mode);
         else pill.removeAttribute('data-clickable');
       }
 
-      // Ask the background for the latest model status
+      // Ask the background for the latest provider/model status
       chrome.runtime.sendMessage({ action: 'ai:status' }, function (resp) {
         if (chrome.runtime.lastError) {
-          applyState('chat-ai-status-unavailable', 'AI off', 'AI features unavailable', true);
+          applyState('chat-ai-status-unavailable', 'AI off', 'AI features unavailable', 'settings');
           return;
         }
         let status = (resp && resp.status) || 'no';
+        let provider = (resp && resp.provider) || 'nano';
+        let modelName = provider === 'openai' ? aiModelLabel(resp.model) : aiModelLabel('gemini-nano');
         if (!enabled) {
-          applyState('chat-ai-status-unavailable', 'AI off', 'AI features disabled — click to open settings', true);
+          applyState('chat-ai-status-unavailable', 'AI off', 'AI features are off — click to turn on', 'toggle');
+        } else if (status === 'readily' && provider === 'openai') {
+          applyState('chat-ai-status-ready-openai', 'AI on', 'ChatGPT · ' + modelName + ' — click to turn AI off', 'toggle');
         } else if (status === 'readily') {
-          applyState('chat-ai-status-ready', 'AI on', 'Gemini Nano ready', false);
-        } else if (status === 'after-download') {
-          applyState('chat-ai-status-downloading', 'Setup', 'Gemini Nano needs to download — click to set up', true);
+          applyState('chat-ai-status-ready', 'AI on', modelName + ' — click to turn AI off', 'toggle');
+        } else if (status === 'no-key') {
+          applyState('chat-ai-status-unavailable', 'No key', 'ChatGPT selected but no API key — click to open Settings', 'settings');
+        } else if (status === 'after-download' || status === 'downloadable' || status === 'downloading') {
+          applyState('chat-ai-status-downloading', 'Setup', 'Gemini Nano needs to download — click to set up', 'settings');
         } else {
-          applyState('chat-ai-status-unavailable', 'No AI', 'Gemini Nano not available on this browser — click for setup info', true);
+          applyState('chat-ai-status-unavailable', 'No AI', 'Gemini Nano not available on this browser — click for setup info', 'settings');
         }
       });
     });
@@ -3173,7 +3106,18 @@
     let pill = document.getElementById('chatAiStatus');
     if (!pill) return;
     pill.addEventListener('click', function () {
-      if (pill.getAttribute('data-clickable') !== 'true') return;
+      let mode = pill.getAttribute('data-clickable');
+      if (!mode) return;
+      if (mode === 'toggle') {
+        // Quick on/off without leaving the chat — flip aiEnabled and let the
+        // storage-change listener below repaint the pill.
+        chatStorageGet(['__0tab_settings']).then(function (result) {
+          let s = (result && result['__0tab_settings']) || {};
+          s.aiEnabled = s.aiEnabled !== true;
+          return chatStorageSet({ '__0tab_settings': s });
+        }).catch(function (e) { console.warn('0tab: AI toggle failed:', e); });
+        return;
+      }
       // Switch the dashboard to Settings → AI section
       let settingsBtn = document.querySelector('[data-view="settings"]');
       if (settingsBtn) settingsBtn.click();
@@ -3289,13 +3233,13 @@
     if (!available) return null;
     try {
       let shortcuts = await getAllShortcuts();
-      let shortcutNames = shortcuts.map(function (s) { return s.name; }).join(', ');
+      let shortcutNames = shortcuts.map(function (s) { return sanitizeForPrompt(s.name); }).join(', ');
       let tree = await getBookmarkTree();
       let folders = flattenFolders(tree);
-      let folderNames = folders.map(function (f) { return f.title; }).join(', ');
+      let folderNames = folders.map(function (f) { return sanitizeForPrompt(f.title); }).join(', ');
       let tagMap = {};
       shortcuts.forEach(function (s) { s.tags.forEach(function (t) { tagMap[t] = true; }); });
-      let tagNames = Object.keys(tagMap).join(', ');
+      let tagNames = Object.keys(tagMap).map(function (t) { return sanitizeForPrompt(t); }).join(', ');
 
       // Include recent conversation for context
       let recentHistory = getConversationContext();
@@ -3337,7 +3281,7 @@
         'action:delete_folder [name] - delete/remove a bookmark folder\n' +
         'help [topic] - help with getting-started, omnibox, shortcuts, tags, dashboard, sync, keyboard, ai-features\n' +
         'out_of_scope - message is unrelated to bookmarks/0tab AI\n\n' +
-        'User message: "' + query + '"\n\nIntent:';
+        'User message: "' + sanitizeForPrompt(query) + '"\n\nIntent:';
 
       let response = await new Promise(function (resolve) {
         let timeout = setTimeout(function () { resolve(null); }, 5000);
@@ -3352,7 +3296,7 @@
       });
 
       if (!response || !response.text) return null;
-      let aiText = response.text.trim().toLowerCase();
+      let aiText = extractChatText(response.text).trim().toLowerCase();
 
       // Parse the AI response into an intent object
       if (aiText.startsWith('greeting')) return { intent: 'greeting' };
@@ -3449,19 +3393,19 @@
     try {
       let response = await new Promise(function (resolve) {
         let timeout = setTimeout(function () { resolve({ results: null }); }, 5000);
-        chrome.runtime.sendMessage({ action: 'ai:search', query: query, shortcuts: shortcuts.map(function (s) { return s.name; }) }, function (r) {
+        chrome.runtime.sendMessage({ action: 'ai:search', query: sanitizeForPrompt(query), shortcuts: shortcuts.map(function (s) { return sanitizeForPrompt(s.name); }) }, function (r) {
           clearTimeout(timeout);
           if (chrome.runtime.lastError) { resolve({ results: null }); return; }
           resolve(r || { results: null });
         });
       });
       if (!response.results || !Array.isArray(response.results) || response.results.length === 0) return null;
-      let aiMatches = response.results.map(function (name) { return shortcuts.find(function (s) { return s.name === name; }); }).filter(Boolean);
+      let aiMatches = response.results.map(function (name) { return shortcuts.find(function (s) { return s.name === name || sanitizeForPrompt(s.name) === name; }); }).filter(Boolean);
       if (aiMatches.length === 0) return null;
       let html = '<div style="margin-bottom:6px;">Found these related results:</div>';
       aiMatches.forEach(function (s) {
         let fav = chatGetFavicon(s.url);
-        html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
+        html += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
       });
       return html;
     } catch (e) { return null; }
@@ -3491,8 +3435,8 @@
       context += '- ' + shortcuts.length + ' shortcuts, ' + counts.bookmarks + ' Chrome bookmarks, ' + folders.length + ' folders\n';
       context += '- ' + Object.keys(tagMap).length + ' unique tags, ' + totalUses + ' total opens\n';
       context += '- ' + deadCount + ' unused shortcuts, ' + untaggedCount + ' untagged shortcuts\n';
-      context += '- Top tags: ' + Object.keys(tagMap).sort(function (a, b) { return tagMap[b] - tagMap[a]; }).slice(0, 10).join(', ') + '\n';
-      context += '- Top shortcuts: ' + topShortcuts.map(function (s) { return s.name + ' (' + s.count + ' opens)'; }).join(', ') + '\n\n';
+      context += '- Top tags: ' + Object.keys(tagMap).sort(function (a, b) { return tagMap[b] - tagMap[a]; }).slice(0, 10).map(function (t) { return sanitizeForPrompt(t); }).join(', ') + '\n';
+      context += '- Top shortcuts: ' + topShortcuts.map(function (s) { return sanitizeForPrompt(s.name) + ' (' + s.count + ' opens)'; }).join(', ') + '\n\n';
       // Include conversation history for context continuity
       let historyStr = getConversationContext();
       if (historyStr) {
@@ -3511,7 +3455,7 @@
       context += '- Proactively suggest actions based on the user\'s data (e.g., if they have many unused bookmarks, suggest cleanup)\n';
       context += '- Reference conversation history when relevant — remember what was just discussed\n';
       context += '- Be a co-pilot: anticipate needs, don\'t just answer questions\n\n';
-      context += 'User says: "' + query + '"\n\nRespond:';
+      context += 'User says: "' + sanitizeForPrompt(query) + '"\n\nRespond:';
 
       let response = await new Promise(function (resolve) {
         let timeout = setTimeout(function () { resolve(null); }, 8000);
@@ -3525,7 +3469,13 @@
         });
       });
       if (response && response.text) {
-        return chatEscapeHtml(response.text) + ' <span style="display:inline-block;background:var(--accent-secondary);color:#fff;padding:1px 5px;border-radius:3px;font-size:9px;font-weight:600;opacity:0.7;vertical-align:middle;">AI</span>';
+        // Badge color mirrors the provider (green = ChatGPT, blue = Gemini
+        // Nano); hovering shows the exact model via an instant CSS tooltip.
+        // Model ids come from our own whitelist, so safe to embed.
+        let isOpenai = response.provider === 'openai';
+        let badgeClass = isOpenai ? 'chat-ai-src chat-ai-src-openai' : 'chat-ai-src chat-ai-src-nano';
+        let badgeModel = isOpenai ? ('ChatGPT · ' + aiModelLabel(response.model)) : aiModelLabel('gemini-nano');
+        return escapeHtml(extractChatText(response.text)) + ' <span class="' + badgeClass + '" data-model="' + badgeModel + '">AI</span>';
       }
       return null;
     } catch (e) { return null; }
@@ -3706,7 +3656,7 @@
     if (!options || options.length === 0) return '';
     let html = '<div class="chat-option-pills">';
     options.forEach(function (opt) {
-      html += '<button class="chat-option-pill" data-query="' + chatEscapeHtml(opt.query) + '">' + chatEscapeHtml(opt.label) + '</button>';
+      html += '<button class="chat-option-pill" data-query="' + escapeHtml(opt.query) + '">' + escapeHtml(opt.label) + '</button>';
     });
     html += '</div>';
     return html;
@@ -3757,7 +3707,7 @@
     if (role === 'bot' && typeof marked !== 'undefined' && typeof html === 'string' && !/<[a-z][\s\S]*>/i.test(html)) {
       try { content.innerHTML = sanitizeRenderedHtml(marked.parse(html)); } catch (e) { content.innerHTML = sanitizeRenderedHtml(html); }
     } else {
-      content.innerHTML = role === 'bot' ? sanitizeRenderedHtml(html) : html;
+      content.innerHTML = role === 'bot' ? sanitizeRenderedHtml(html) : escapeHtml(html);
     }
     // Append option pills if provided
     if (options && options.length > 0) {
@@ -3775,7 +3725,7 @@
       feedbackBar.innerHTML =
         '<button class="chat-feedback-btn" data-feedback="up" title="Helpful"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg></button>' +
         '<button class="chat-feedback-btn" data-feedback="down" title="Not helpful"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"/><path d="M17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"/></svg></button>' +
-        (originalQuery ? '<button class="chat-feedback-btn chat-retry-btn" data-feedback="retry" data-query="' + chatEscapeHtml(originalQuery) + '" title="Try again"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>' : '');
+        (originalQuery ? '<button class="chat-feedback-btn chat-retry-btn" data-feedback="retry" data-query="' + escapeHtml(originalQuery) + '" title="Try again"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>' : '');
       msg.appendChild(feedbackBar);
       // Wire feedback clicks
       feedbackBar.querySelectorAll('.chat-feedback-btn').forEach(function (btn) {
@@ -3842,7 +3792,7 @@
     // Add stop button during streaming
     let stopBtn = document.createElement('button');
     stopBtn.innerHTML = '<svg width="10" height="10" viewBox="0 0 24 24" fill="currentColor"><rect x="4" y="4" width="16" height="16" rx="2"/></svg> Stop';
-    stopBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin-top:8px;padding:3px 10px;font-size:11px;background:var(--bg-tertiary);color:var(--text-muted);border:1px solid var(--border-primary);border-radius:6px;cursor:pointer;';
+    stopBtn.style.cssText = 'display:inline-flex;align-items:center;gap:4px;margin-top:8px;padding:3px 10px;font-size:11px;background:var(--bg-hover);color:var(--text-muted);border:1px solid var(--border-primary);border-radius:6px;cursor:pointer;';
     msg.appendChild(stopBtn);
 
     function onStreamEnd() {
@@ -3871,7 +3821,7 @@
       feedbackBar.innerHTML =
         '<button class="chat-feedback-btn" data-feedback="up" title="Helpful"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 9V5a3 3 0 0 0-3-3l-4 9v11h11.28a2 2 0 0 0 2-1.7l1.38-9a2 2 0 0 0-2-2.3H14z"/><path d="M7 22H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3"/></svg></button>' +
         '<button class="chat-feedback-btn" data-feedback="down" title="Not helpful"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 15v4a3 3 0 0 0 3 3l4-9V2H5.72a2 2 0 0 0-2 1.7l-1.38 9a2 2 0 0 0 2 2.3H10z"/><path d="M17 2h3a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-3"/></svg></button>' +
-        (originalQuery ? '<button class="chat-feedback-btn chat-retry-btn" data-feedback="retry" data-query="' + chatEscapeHtml(originalQuery) + '" title="Try again"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>' : '');
+        (originalQuery ? '<button class="chat-feedback-btn chat-retry-btn" data-feedback="retry" data-query="' + escapeHtml(originalQuery) + '" title="Try again"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>' : '');
       msg.appendChild(feedbackBar);
       feedbackBar.querySelectorAll('.chat-feedback-btn').forEach(function (btn) {
         btn.addEventListener('click', function () {
@@ -3940,11 +3890,14 @@
     if (el) el.remove();
   }
 
+  let _chatSending = false;
   async function sendMessage() {
+    if (_chatSending) return;
     if (!sendMessageFn) sendMessageFn = sendMessage;
     let input = document.getElementById('chatInput');
     let query = input.value.trim();
     if (!query) return;
+    _chatSending = true;
 
     // Track conversation history
     addToHistory('user', query);
@@ -3952,7 +3905,7 @@
     // Don't show internal command prefixes to user
     let displayQuery = query.replace(/^__open_folder_all__.*/, 'Open all bookmarks in folder')
                             .replace(/^__open_url__(.*)/, 'Open $1');
-    addMessage('user', chatEscapeHtml(displayQuery));
+    addMessage('user', displayQuery);
     input.value = '';
 
     // Hide action area if visible
@@ -4033,7 +3986,7 @@
             conversationState.memory.lastAction = null; // single-shot
             response = undoResult || 'Undone!';
           } catch (e) {
-            response = 'Could not undo: ' + chatEscapeHtml(e && e.message || 'unknown error');
+            response = 'Could not undo: ' + escapeHtml(e && e.message || 'unknown error');
           }
         }
         hideTyping();
@@ -4097,7 +4050,7 @@
           let exactMatch = singleShortcuts.find(function (s) { return s.name.toLowerCase() === parsed.term; });
           if (exactMatch) {
             response = {
-              text: 'Found your shortcut <strong>' + chatEscapeHtml(exactMatch.name) + '</strong> (' + chatEscapeHtml(exactMatch.url) + ').',
+              text: 'Found your shortcut <strong>' + escapeHtml(exactMatch.name) + '</strong> (' + escapeHtml(exactMatch.url) + ').',
               options: [
                 { label: 'Open ' + exactMatch.name, query: 'Open ' + exactMatch.name },
                 { label: 'Delete ' + exactMatch.name, query: 'Delete shortcut ' + exactMatch.name }
@@ -4107,10 +4060,10 @@
             // Try partial match
             let partialMatches = singleShortcuts.filter(function (s) { return s.name.toLowerCase().includes(parsed.term); });
             if (partialMatches.length > 0) {
-              response = '<div style="margin-bottom:6px;">Found ' + partialMatches.length + ' shortcut' + (partialMatches.length > 1 ? 's' : '') + ' matching <strong>' + chatEscapeHtml(parsed.term) + '</strong>:</div>';
+              response = '<div style="margin-bottom:6px;">Found ' + partialMatches.length + ' shortcut' + (partialMatches.length > 1 ? 's' : '') + ' matching <strong>' + escapeHtml(parsed.term) + '</strong>:</div>';
               partialMatches.slice(0, 5).forEach(function (s) {
                 let fav = chatGetFavicon(s.url);
-                response += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + chatEscapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
+                response += '<div class="chat-list-item"><img src="' + fav + '"><span class="chat-list-name">' + escapeHtml(s.name) + '</span><span class="chat-list-meta">' + s.count + ' opens</span></div>';
               });
             } else {
               response = null; // Fall through to default/AI
@@ -4191,11 +4144,15 @@
               });
             }
             response = 'Opened <strong>' + folderUrls.length + '</strong> bookmarks from the folder.';
-          } catch (e) { response = 'Failed to open folder: ' + chatEscapeHtml(e.message); }
+          } catch (e) { response = 'Failed to open folder: ' + escapeHtml(e.message); }
           break;
         case 'action:open_url':
-          chrome.tabs.create({ url: parsed.url });
-          response = 'Opening...';
+          if (parsed.url && isOpenableUrl(parsed.url)) {
+            chrome.tabs.create({ url: parsed.url });
+            response = 'Opening...';
+          } else {
+            response = 'That URL cannot be opened (unsupported scheme).';
+          }
           break;
         case 'action:delete_shortcut':
           response = await handleDeleteShortcut(parsed.shortcutName);
@@ -4309,7 +4266,9 @@
       }
     } catch (e) {
       hideTyping();
-      addMessage('bot', 'Something went wrong: ' + chatEscapeHtml(e.message));
+      addMessage('bot', 'Something went wrong: ' + escapeHtml(e.message));
+    } finally {
+      _chatSending = false;
     }
   }
 
@@ -4330,8 +4289,8 @@
       let deletedAgo = chatTimeAgo(item.deletedAt);
       html += '<div class="trash-item" data-index="' + idx + '">';
       html += '<img src="' + fav + '" class="trash-item-favicon">';
-      html += '<div class="trash-item-info"><span class="trash-item-name">' + chatEscapeHtml(item.name) + '</span>';
-      html += '<span class="trash-item-meta">' + chatEscapeHtml(item.url.substring(0, 50)) + (item.url.length > 50 ? '...' : '') + ' &middot; deleted ' + deletedAgo + '</span></div>';
+      html += '<div class="trash-item-info"><span class="trash-item-name">' + escapeHtml(item.name) + '</span>';
+      html += '<span class="trash-item-meta">' + escapeHtml(item.url.substring(0, 50)) + (item.url.length > 50 ? '...' : '') + ' &middot; deleted ' + deletedAgo + '</span></div>';
       html += '<button class="trash-restore-btn" data-index="' + idx + '">Restore</button>';
       html += '</div>';
     });
@@ -4389,7 +4348,7 @@
     let totalUses = 0;
     shortcuts.forEach(function (s) { totalUses += s.count; });
 
-    let greeting = userName ? 'Hey ' + chatEscapeHtml(userName) + '!' : 'Hey!';
+    let greeting = userName ? 'Hey ' + escapeHtml(userName) + '!' : 'Hey!';
     let statsLine = '<span style="color:var(--text-secondary);font-size:12px;">' + counts.bookmarks + ' bookmarks &middot; ' + shortcuts.length + ' shortcuts &middot; ' + folders.length + ' folders</span>';
 
     let welcomeHtml = '<div class="chat-welcome-card">';

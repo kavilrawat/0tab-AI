@@ -3,21 +3,12 @@
 // Handles: omnibox, context menu, bookmark sync, defaults
 // ============================================================
 
+// Shared helpers (INTERNAL_KEYS, isShortcutKey, storage migrations,
+// storageGet/Set/Remove, sanitizeForPrompt, ...) — must load first.
+importScripts('shared.js');
+
 // Uninstall feedback form — fires when the user removes the extension.
 try { chrome.runtime.setUninstallURL('https://tally.so/r/1AbzB4'); } catch (e) {}
-
-// --- Internal storage keys (prefixed to avoid conflicts) ---
-// Any storage key starting with "__" is internal bookkeeping (settings,
-// migration flags, stats, etc.) and must never be treated as a shortcut.
-// Keeping this list explicit for known keys; the isShortcutKey helper
-// also defensively rejects any "__"-prefixed key.
-const INTERNAL_KEYS = ['__0tab_folders', '__0tab_settings', '__0tab_migrated_v1', '__0tab_migrated_v2', '__0tab_daily_stats', '__0tab_trash'];
-
-function isShortcutKey(key) {
-  if (!key || typeof key !== 'string') return false;
-  if (key.startsWith('__')) return false;
-  return !INTERNAL_KEYS.includes(key);
-}
 
 // ============================================================
 // AI MODULE - Gemini Nano via Offscreen Document
@@ -28,9 +19,7 @@ let aiAvailability = null; // 'readily' | 'after-download' | 'no' | null
 let offscreenCreated = false;
 
 async function ensureOffscreen() {
-  if (offscreenCreated) return true;
   try {
-    // Check if one already exists
     let existingContexts = await chrome.runtime.getContexts({
       contextTypes: ['OFFSCREEN_DOCUMENT'],
       documentUrls: [chrome.runtime.getURL('offscreen.html')]
@@ -39,6 +28,7 @@ async function ensureOffscreen() {
       offscreenCreated = true;
       return true;
     }
+    offscreenCreated = false;
     await chrome.offscreen.createDocument({
       url: 'offscreen.html',
       reasons: ['DOM_PARSER'],
@@ -47,6 +37,7 @@ async function ensureOffscreen() {
     offscreenCreated = true;
     return true;
   } catch (e) {
+    offscreenCreated = false;
     console.warn('0tab: Failed to create offscreen document:', e.message);
     return false;
   }
@@ -86,11 +77,111 @@ async function checkAiAvailability() {
   }
 }
 
-// Prompt the AI via the offscreen document
-async function aiPrompt(promptText) {
-  if (aiAvailability === 'no') return null;
+// --- AI provider settings (Chrome Gemini Nano vs ChatGPT/OpenAI) ---
+// One provider is active at a time (settings.aiProvider), and each AI
+// feature can be individually enabled/disabled (settings.aiFeatures).
+const OPENAI_MODELS = ['gpt-4o-mini', 'gpt-4o', 'gpt-5.4-nano', 'gpt-5.4-mini', 'gpt-5.4'];
+const AI_FEATURE_DEFAULTS = {
+  tags: true,         // Smart tag generation
+  search: true,       // AI search fallback
+  name: true,         // Shortcut name suggestion
+  description: true,  // AI description
+  chat: true,         // Ask 0tab chat
+  duplicates: false   // Duplicate detection (off by default — advisory only)
+};
+let _aiSettingsCache = null;
+try {
+  chrome.storage.onChanged.addListener(function (changes, area) {
+    if (area === 'local' && changes['__0tab_settings']) {
+      _aiSettingsCache = null;
+      // Also drop the Nano availability cache: a stale 'no' from a prior
+      // Nano check would otherwise suppress AI paths (e.g. omnibox search)
+      // after the user switches provider, until the worker recycles.
+      aiAvailability = null;
+    }
+  });
+} catch (e) {}
+
+async function getAiSettings() {
+  if (_aiSettingsCache) return _aiSettingsCache;
+  let result = await storageGet('__0tab_settings');
+  let s = result['__0tab_settings'] || {};
+  _aiSettingsCache = {
+    enabled: s.aiEnabled === true,
+    provider: s.aiProvider === 'openai' ? 'openai' : 'nano',
+    openaiKey: typeof s.openaiApiKey === 'string' ? s.openaiApiKey.trim() : '',
+    openaiModel: OPENAI_MODELS.includes(s.openaiModel) ? s.openaiModel : 'gpt-4o-mini',
+    features: Object.assign({}, AI_FEATURE_DEFAULTS, s.aiFeatures || {})
+  };
+  return _aiSettingsCache;
+}
+
+async function aiFeatureEnabled(feature) {
+  let s = await getAiSettings();
+  return s.enabled && s.features[feature] !== false;
+}
+
+// ChatGPT path: straight fetch from the service worker. Uses
+// max_completion_tokens (not max_tokens) and default temperature so the
+// same request shape works for both the gpt-4o and gpt-5.x families.
+async function openaiPrompt(promptText, settings, opts) {
+  let controller = new AbortController();
+  let timer = setTimeout(function () { controller.abort(); }, 30000);
+  // Structured features (tags/search/name/dupes) parse JSON out of the reply;
+  // chat wants natural language. Pick the system prompt accordingly —
+  // otherwise GPT dutifully wraps chat replies in {"response":"..."}.
+  let systemMsg = (opts && opts.plain)
+    ? 'You are 0tab, a friendly bookmark assistant inside a Chrome extension. Respond in plain conversational text — no JSON, no markdown code fences, no key-value wrappers. Be concise. Only when the user prompt explicitly asks for a specific output format (like a single intent word), follow that format exactly.'
+    : 'You are 0tab, a bookmark assistant inside a Chrome extension. Always respond with valid JSON only — no markdown, no explanation, no extra text. Be concise and accurate.';
+  try {
+    let res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + settings.openaiKey
+      },
+      body: JSON.stringify({
+        model: settings.openaiModel,
+        messages: [
+          { role: 'system', content: systemMsg },
+          { role: 'user', content: promptText }
+        ],
+        max_completion_tokens: 1000
+      }),
+      signal: controller.signal
+    });
+    if (!res.ok) {
+      let errMsg = '';
+      try { let ej = await res.json(); errMsg = (ej && ej.error && ej.error.message) || ''; } catch (e) {}
+      console.warn('0tab AI: OpenAI request failed:', res.status, errMsg);
+      return null;
+    }
+    let data = await res.json();
+    let content = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+    return typeof content === 'string' && content.trim() ? content : null;
+  } catch (e) {
+    console.warn('0tab AI: OpenAI request error:', e.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Prompt the active AI provider. Every AI feature funnels through here.
+// opts.plain: natural-language reply (chat) instead of JSON-only.
+async function aiPrompt(promptText, opts) {
+  let settings = await getAiSettings();
+  if (!settings.enabled) return null;
+  if (settings.provider === 'openai') {
+    if (!settings.openaiKey) return null;
+    return openaiPrompt(promptText, settings, opts);
+  }
+  // Gemini Nano path (offscreen document)
+  if (aiAvailability && aiAvailability !== 'readily') return null;
   if (!aiAvailability) await checkAiAvailability();
-  if (aiAvailability === 'no') return null;
+  // Anything but 'readily' (incl. 'downloadable') must not prompt — a
+  // create() on an undownloaded model can implicitly start a huge download.
+  if (aiAvailability !== 'readily') return null;
   let ok = await ensureOffscreen();
   if (!ok) return null;
   let resp = await sendToOffscreen('ai:prompt', { prompt: promptText }, 30000);
@@ -98,18 +189,23 @@ async function aiPrompt(promptText) {
   return null;
 }
 
+// Strip markdown code fences that models wrap around JSON output.
+function cleanAiJson(response) {
+  return String(response || '').replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+}
+
 // --- AI Feature: Smart Auto-Tagging ---
 async function aiGenerateTags(title, url) {
   try {
     let prompt = `Generate 3-5 short tags (1-2 words each, lowercase) for this bookmark.
-Title: "${title}"
-URL: ${url}
+Title: "${sanitizeForPrompt(title)}"
+URL: ${sanitizeForPrompt(url)}
 
 Return ONLY a JSON array of strings. Example: ["dev","react","github"]`;
 
     let response = await aiPrompt(prompt);
     if (!response) return null;
-    let cleaned = response.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+    let cleaned = cleanAiJson(response);
     let tags = JSON.parse(cleaned);
     if (Array.isArray(tags)) {
       return tags
@@ -132,20 +228,20 @@ async function aiSearchShortcuts(query, shortcuts) {
       let url = typeof data === 'object' ? (data.url || '') : (data || '');
       let tags = typeof data === 'object' && Array.isArray(data.tags) ? data.tags.join(',') : '';
       let title = typeof data === 'object' ? (data.bookmarkTitle || data.folderTitle || '') : '';
-      return `${s.key}|${title}|${url}|${tags}`;
+      return `${sanitizeForPrompt(s.key, 30)}|${sanitizeForPrompt(title)}|${sanitizeForPrompt(url)}|${sanitizeForPrompt(tags)}`;
     }).slice(0, 50).join('\n');
 
     let prompt = `Given these bookmarks (format: shortcut|title|url|tags):
 ${shortcutList}
 
-The user searched: "${query}"
+The user searched: "${sanitizeForPrompt(query)}"
 
 Return a JSON array of the top 5 matching shortcut names, best match first. Match by meaning, not just keywords.
 Example: ["desk","admin","docs"]`;
 
     let response = await aiPrompt(prompt);
     if (!response) return null;
-    let cleaned = response.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+    let cleaned = cleanAiJson(response);
     let results = JSON.parse(cleaned);
     if (Array.isArray(results)) {
       return results.map(String).slice(0, 5);
@@ -160,10 +256,10 @@ Example: ["desk","admin","docs"]`;
 // --- AI Feature: Generate Shortcut Name ---
 async function aiGenerateShortcutName(title, url, existingKeys) {
   try {
-    let existingList = existingKeys.slice(0, 30).join(', ');
+    let existingList = existingKeys.slice(0, 30).map(k => sanitizeForPrompt(k, 30)).join(', ');
     let prompt = `Generate a very short 0tab keyboard shortcut name (2-3 letters) for this bookmark.
-Title: "${title}"
-URL: ${url}
+Title: "${sanitizeForPrompt(title)}"
+URL: ${sanitizeForPrompt(url)}
 
 Rules:
 - Lowercase only, no spaces, EXACTLY 2-3 characters
@@ -174,7 +270,7 @@ Return ONLY a JSON string. Example: "fig" or "gd" or "jr"`;
 
     let response = await aiPrompt(prompt);
     if (!response) return null;
-    let cleaned = response.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+    let cleaned = cleanAiJson(response);
     let name = JSON.parse(cleaned);
     if (typeof name === 'string') {
       name = name.toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 3);
@@ -191,14 +287,14 @@ Return ONLY a JSON string. Example: "fig" or "gd" or "jr"`;
 async function aiGenerateDescription(title, url) {
   try {
     let prompt = `Write a one-line description (max 80 chars) for this bookmark.
-Title: "${title}"
-URL: ${url}
+Title: "${sanitizeForPrompt(title)}"
+URL: ${sanitizeForPrompt(url)}
 
 Return ONLY a JSON string. Example: "Project management tool for agile teams"`;
 
     let response = await aiPrompt(prompt);
     if (!response) return null;
-    let cleaned = response.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+    let cleaned = cleanAiJson(response);
     let desc = JSON.parse(cleaned);
     if (typeof desc === 'string') {
       return desc.substring(0, 100);
@@ -217,12 +313,12 @@ async function aiDetectDuplicates(newTitle, newUrl, existingShortcuts) {
       let data = s.data;
       let url = typeof data === 'object' ? (data.url || '') : (data || '');
       let title = typeof data === 'object' ? (data.bookmarkTitle || '') : '';
-      return `${s.key}|${title}|${url}`;
+      return `${sanitizeForPrompt(s.key, 30)}|${sanitizeForPrompt(title)}|${sanitizeForPrompt(url)}`;
     }).slice(0, 40).join('\n');
 
     let prompt = `I'm about to save a new bookmark:
-Title: "${newTitle}"
-URL: ${newUrl}
+Title: "${sanitizeForPrompt(newTitle)}"
+URL: ${sanitizeForPrompt(newUrl)}
 
 Here are existing bookmarks (shortcut|title|url):
 ${existing}
@@ -232,7 +328,7 @@ Example: ["desk"] or []`;
 
     let response = await aiPrompt(prompt);
     if (!response) return null;
-    let cleaned = response.replace(/```json?\s*/g, '').replace(/```/g, '').trim();
+    let cleaned = cleanAiJson(response);
     let dupes = JSON.parse(cleaned);
     if (Array.isArray(dupes)) {
       return dupes.map(String).slice(0, 3);
@@ -248,168 +344,11 @@ Example: ["desk"] or []`;
 // or when an AI feature is used. This avoids creating the offscreen document
 // (and triggering LanguageModel warnings) on browsers that don't need it.
 
-// --- Safely wrap chrome.storage calls ---
-// Storage moved from chrome.storage.sync to chrome.storage.local to avoid
-// sync quota failures. Existing sync data is migrated once.
-let __0tabMigrationPromise = null;
-function __0tabEnsureMigrated() {
-  if (__0tabMigrationPromise) return __0tabMigrationPromise;
-  __0tabMigrationPromise = new Promise(function (resolve) {
-    try {
-      chrome.storage.local.get('__0tab_migrated_v1', function (flagRes) {
-        if (chrome.runtime.lastError || (flagRes && flagRes.__0tab_migrated_v1)) {
-          resolve(); return;
-        }
-        chrome.storage.sync.get(null, function (syncData) {
-          if (chrome.runtime.lastError || !syncData || Object.keys(syncData).length === 0) {
-            chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-            return;
-          }
-          chrome.storage.local.get(null, function (localData) {
-            let toCopy = {};
-            Object.keys(syncData).forEach(function (k) {
-              if (!(k in localData)) toCopy[k] = syncData[k];
-            });
-            if (Object.keys(toCopy).length === 0) {
-              chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-              return;
-            }
-            chrome.storage.local.set(toCopy, function () {
-              chrome.storage.local.set({ '__0tab_migrated_v1': true }, function () { resolve(); });
-            });
-          });
-        });
-      });
-    } catch (e) { resolve(); }
-  });
-  return __0tabMigrationPromise;
-}
-__0tabEnsureMigrated();
 
-// v2 migration: rebrand from Tab0 AI → 0tab AI. Renames the legacy `__ssg_*`
-// and `__tab0_*` storage keys to `__0tab_*`. Idempotent and gated by
-// `__0tab_migrated_v2`. Runs once per install after the v1 sync→local
-// migration completes.
-const __0TAB_KEY_RENAME_MAP = {
-  '__ssg_folders': '__0tab_folders',
-  '__ssg_settings': '__0tab_settings',
-  '__ssg_trash': '__0tab_trash',
-  '__tab0_migrated_v1': '__0tab_migrated_v1',
-  '__tab0_daily_stats': '__0tab_daily_stats',
-  '__tab0_history_imported_v1': '__0tab_history_imported_v1',
-  '__tab0_history_dismissed_v1': '__0tab_history_dismissed_v1'
-};
-let __0tabMigrationV2Promise = null;
-function __0tabEnsureMigratedV2() {
-  if (__0tabMigrationV2Promise) return __0tabMigrationV2Promise;
-  __0tabMigrationV2Promise = __0tabEnsureMigrated().then(function () {
-    return new Promise(function (resolve) {
-      try {
-        chrome.storage.local.get('__0tab_migrated_v2', function (flagRes) {
-          if (chrome.runtime.lastError || (flagRes && flagRes.__0tab_migrated_v2)) {
-            resolve(); return;
-          }
-          chrome.storage.local.get(null, function (all) {
-            if (chrome.runtime.lastError) { resolve(); return; }
-            all = all || {};
-            let writes = {};
-            let removes = [];
-            Object.keys(__0TAB_KEY_RENAME_MAP).forEach(function (oldK) {
-              let newK = __0TAB_KEY_RENAME_MAP[oldK];
-              if (oldK in all) {
-                if (!(newK in all)) writes[newK] = all[oldK];
-                removes.push(oldK);
-              }
-            });
-            // Order: writes → removes → flag. The migrated_v2 flag is set
-            // ONLY after both writes and removes succeed without lastError;
-            // if either fails we resolve without setting the flag so the
-            // next load retries. Old keys may briefly co-exist with new
-            // keys mid-migration — readers go through the rename map.
-            function finish() {
-              chrome.storage.local.set({ '__0tab_migrated_v2': true }, function () { resolve(); });
-            }
-            function doRemove() {
-              if (removes.length === 0) { finish(); return; }
-              chrome.storage.local.remove(removes, function () {
-                if (chrome.runtime.lastError) { resolve(); return; }
-                finish();
-              });
-            }
-            if (Object.keys(writes).length === 0) {
-              doRemove();
-            } else {
-              chrome.storage.local.set(writes, function () {
-                if (chrome.runtime.lastError) { resolve(); return; }
-                doRemove();
-              });
-            }
-          });
-        });
-      } catch (e) { resolve(); }
-    });
-  });
-  return __0tabMigrationV2Promise;
-}
-__0tabEnsureMigratedV2();
-
-function storageGet(keys) {
-  return __0tabEnsureMigratedV2().then(function () {
-    return new Promise(function (resolve, reject) {
-      chrome.storage.local.get(keys, function (result) {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve(result);
-      });
-    });
-  });
-}
-
-function storageSet(data) {
-  return __0tabEnsureMigratedV2().then(function () {
-    return new Promise(function (resolve, reject) {
-      chrome.storage.local.set(data, function () {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve();
-      });
-    });
-  });
-}
-
-function storageRemove(keys) {
-  return __0tabEnsureMigratedV2().then(function () {
-    return new Promise(function (resolve, reject) {
-      chrome.storage.local.remove(keys, function () {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve();
-      });
-    });
-  });
-}
-
-// One-shot catch-up sweep so every existing Chrome bookmark — not just
-// those created after this build was installed — picks up a 0tab
-// shortcut. Gated by a session flag so we run it once per browser
-// session, not every time the service worker wakes.
-const _SESSION_RECONCILE_KEY = '__0tab_session_reconciled';
-async function _maybeReconcileExistingBookmarks() {
-  try {
-    if (!chrome.storage.session) return;
-    let flag = await new Promise(function (resolve) {
-      chrome.storage.session.get(_SESSION_RECONCILE_KEY, function (r) { resolve(r && r[_SESSION_RECONCILE_KEY]); });
-    });
-    if (flag) return;
-    // Mark BEFORE running so two near-simultaneous wakes don't double-run.
-    await new Promise(function (resolve) {
-      chrome.storage.session.set({ [_SESSION_RECONCILE_KEY]: true }, function () { resolve(); });
-    });
-    let res = await storageGet(['__0tab_settings']);
-    let s = res['__0tab_settings'] || {};
-    if (s.bookmarkSync === false) return;
-    await saveAllBookmarksAsShortcuts();
-  } catch (e) { /* silent */ }
-}
-// Defer slightly so the migration helpers and folder rename complete first.
-setTimeout(_maybeReconcileExistingBookmarks, 1500);
+// Do not run a full bookmark sweep every time the MV3 service worker wakes.
+// That sweep can be very expensive for large bookmark collections and used to
+// generate shortcut keys opportunistically in the background. Reconciliation
+// still runs from explicit dashboard/install flows and bookmark create events.
 
 
 // ============================================================
@@ -417,12 +356,29 @@ setTimeout(_maybeReconcileExistingBookmarks, 1500);
 // storage listeners triggering each other
 // ============================================================
 let syncLock = false;
+let syncPendingFn = null;
 
 function withSyncLock(fn) {
-  if (syncLock) return Promise.resolve();
+  if (syncLock) {
+    syncPendingFn = fn;
+    // Marker so message handlers can tell "queued behind a running sync"
+    // apart from "ran and found nothing to do".
+    return Promise.resolve({ queued: true });
+  }
   syncLock = true;
+  let safetyTimer = setTimeout(() => { syncLock = false; }, 30000);
   return fn().finally(() => {
-    setTimeout(() => { syncLock = false; }, 2000);
+    clearTimeout(safetyTimer);
+    // Short grace period after settling so echoed bookmark/storage events
+    // from our own writes don't immediately re-trigger the listeners.
+    setTimeout(() => {
+      syncLock = false;
+      if (syncPendingFn) {
+        let next = syncPendingFn;
+        syncPendingFn = null;
+        withSyncLock(next);
+      }
+    }, 2000);
   });
 }
 
@@ -656,21 +612,10 @@ chrome.runtime.onInstalled.addListener(function (details) {
           }
         }
 
-        // STEP 3: Remove old bookmark-linked shortcuts and re-import all bookmarks cleanly
-        let refreshed = await storageGet(null);
-        let toRemove = [];
-        Object.keys(refreshed).filter(isShortcutKey).forEach(k => {
-          let data = refreshed[k];
-          if (typeof data === 'object' && data.bookmarkId) {
-            toRemove.push(k);
-          }
-        });
-        if (toRemove.length > 0) {
-          await storageRemove(toRemove);
-        }
-
-        // STEP 4: Re-import all Chrome bookmarks as shortcuts (with clean names)
-        await saveAllBookmarksAsShortcuts();
+        // STEP 3: Non-destructive reconcile. Existing storage keys are user
+        // shortcut names and must be preserved; only missing links/shortcuts
+        // are added.
+        await reconcileBookmarksShortcuts();
 
       } catch (e) {
         console.error('0tab: Migration error:', e);
@@ -789,6 +734,25 @@ chrome.omnibox.onInputStarted.addListener(() => {
   }
 });
 
+// isOpenableUrl (safe-scheme whitelist) is provided by shared.js.
+
+function openUrlInTab(url, disposition) {
+  if (!url || !isOpenableUrl(url)) {
+    if (url) console.warn('0tab: Omnibox blocked unsafe URL scheme:', url);
+    return;
+  }
+  if (disposition === 'currentTab') chrome.tabs.update({ url: url });
+  else chrome.tabs.create({ url: url });
+}
+
+function openFolderUrlsSimple(urls, disposition) {
+  let safe = urls.filter(isOpenableUrl);
+  if (!safe.length) return;
+  if (disposition === 'currentTab') chrome.tabs.update({ url: safe[0] });
+  else chrome.tabs.create({ url: safe[0] });
+  for (let i = 1; i < safe.length; i++) chrome.tabs.create({ url: safe[i] });
+}
+
 chrome.omnibox.onInputEntered.addListener(async (text, disposition) => {
   text = text.toLowerCase().trim();
 
@@ -813,7 +777,11 @@ chrome.omnibox.onInputEntered.addListener(async (text, disposition) => {
         shortcutData.count = (shortcutData.count || 0) + 1;
         shortcutData.lastAccessed = Date.now();
         await storageSet({ [text]: shortcutData });
-        let urls = shortcutData.urls;
+        let urls = shortcutData.urls.filter(u => {
+          if (isOpenableUrl(u)) return true;
+          console.warn('0tab: Omnibox blocked unsafe URL scheme:', u);
+          return false;
+        });
         if (urls.length > 0) {
           // Check tab group setting
           let settingsResult = await storageGet(['__0tab_settings']);
@@ -862,20 +830,12 @@ chrome.omnibox.onInputEntered.addListener(async (text, disposition) => {
         shortcutData.lastAccessed = Date.now();
         await storageSet({ [text]: shortcutData });
         logAccess(text, shortcutData.url);
-        if (disposition === 'currentTab') {
-          chrome.tabs.update({ url: shortcutData.url });
-        } else {
-          chrome.tabs.create({ url: shortcutData.url });
-        }
+        openUrlInTab(shortcutData.url, disposition);
       } else {
         let newData = { url: shortcutData, count: 1, lastAccessed: Date.now(), folder: '' };
         await storageSet({ [text]: newData });
         logAccess(text, newData.url);
-        if (disposition === 'currentTab') {
-          chrome.tabs.update({ url: newData.url });
-        } else {
-          chrome.tabs.create({ url: newData.url });
-        }
+        openUrlInTab(newData.url, disposition);
       }
     } else {
       // No exact shortcut match. If the user typed what looks like a
@@ -908,27 +868,11 @@ chrome.omnibox.onInputEntered.addListener(async (text, disposition) => {
 
         // Handle folder-type shortcuts
         if (typeof bestData === 'object' && bestData.type === 'folder' && Array.isArray(bestData.urls)) {
-          let urls = bestData.urls;
-          if (urls.length > 0) {
-            if (disposition === 'currentTab') {
-              chrome.tabs.update({ url: urls[0] });
-            } else {
-              chrome.tabs.create({ url: urls[0] });
-            }
-            for (let i = 1; i < urls.length; i++) {
-              chrome.tabs.create({ url: urls[i] });
-            }
-          }
+          openFolderUrlsSimple(bestData.urls, disposition);
         } else {
           let bestUrl = typeof bestData === 'object' ? bestData.url : bestData;
-          if (bestUrl) {
-            logAccess(bestKey, bestUrl);
-            if (disposition === 'currentTab') {
-              chrome.tabs.update({ url: bestUrl });
-            } else {
-              chrome.tabs.create({ url: bestUrl });
-            }
-          }
+          logAccess(bestKey, bestUrl);
+          openUrlInTab(bestUrl, disposition);
         }
       } else {
         // No keyword matches — try AI search before giving up
@@ -948,18 +892,10 @@ chrome.omnibox.onInputEntered.addListener(async (text, disposition) => {
               await storageSet({ [aiKey]: aiData });
             }
             if (typeof aiData === 'object' && aiData.type === 'folder' && Array.isArray(aiData.urls)) {
-              let urls = aiData.urls;
-              if (urls.length > 0) {
-                if (disposition === 'currentTab') chrome.tabs.update({ url: urls[0] });
-                else chrome.tabs.create({ url: urls[0] });
-                for (let i = 1; i < urls.length; i++) chrome.tabs.create({ url: urls[i] });
-              }
+              openFolderUrlsSimple(aiData.urls, disposition);
             } else {
               let aiUrl = typeof aiData === 'object' ? aiData.url : aiData;
-              if (aiUrl) {
-                if (disposition === 'currentTab') chrome.tabs.update({ url: aiUrl });
-                else chrome.tabs.create({ url: aiUrl });
-              }
+              openUrlInTab(aiUrl, disposition);
             }
           }
         } else {
@@ -1150,6 +1086,56 @@ async function getOrCreateSubfolder(parentId, title) {
   });
 }
 
+function normalizeUrlForMatch(url) {
+  return (url || '').replace(/\/+$/, '').toLowerCase();
+}
+
+function shortcutBaseFromTitle(title, fallback) {
+  let base = String(title || fallback || 'bookmark')
+    .replace(/^\//, '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .substring(0, 3);
+  return base || 'bm';
+}
+
+function uniqueShortcutNameFromBase(baseName, usedNames, pendingNames) {
+  let base = String(baseName || 'bm').toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 15) || 'bm';
+  if (!usedNames[base] && !(pendingNames && pendingNames[base])) return base;
+  let counter = 2;
+  let finalName = base;
+  while (usedNames[finalName] || (pendingNames && pendingNames[finalName])) {
+    let suffix = String(counter);
+    finalName = base.substring(0, 15 - suffix.length) + suffix;
+    counter++;
+    if (counter > 999) break;
+  }
+  return finalName;
+}
+
+function findShortcutKeyForBookmark(items, bookmarkId) {
+  if (!bookmarkId) return '';
+  let keys = Object.keys(items || {}).filter(isShortcutKey);
+  for (let i = 0; i < keys.length; i++) {
+    let data = items[keys[i]];
+    if (data && typeof data === 'object' && data.bookmarkId === bookmarkId) return keys[i];
+  }
+  return '';
+}
+
+function findShortcutKeyForUrl(items, url) {
+  let normalized = normalizeUrlForMatch(url);
+  if (!normalized) return '';
+  let keys = Object.keys(items || {}).filter(isShortcutKey);
+  for (let i = 0; i < keys.length; i++) {
+    let data = items[keys[i]];
+    let savedUrl = typeof data === 'object' ? (data.url || '') : (data || '');
+    if (normalizeUrlForMatch(savedUrl) === normalized) return keys[i];
+  }
+  return '';
+}
+
 // Full sync: push all shortcuts to bookmarks
 // Sync only standalone shortcuts (not linked to existing bookmarks) to the 0tab folder.
 // Bookmarks that already exist in the browser stay in their original location.
@@ -1162,24 +1148,19 @@ async function syncShortcutsToBookmarks() {
     }
     let items = await storageGet(null);
 
-    // Get existing children in the 0tab folder
+    // Get existing children in the 0tab folder. This sync is intentionally
+    // non-destructive: user-created bookmark children must never be removed
+    // just because a shortcut changed.
     let children = await new Promise(resolve => {
       chrome.bookmarks.getChildren(folder.id, (result) => {
         if (chrome.runtime.lastError) { resolve([]); return; }
         resolve(result || []);
       });
     });
-
-    // Remove all existing children (clean slate for 0tab folder only)
-    for (let child of children) {
-      try {
-        if (child.url) {
-          await new Promise(resolve => chrome.bookmarks.remove(child.id, resolve));
-        } else {
-          await new Promise(resolve => chrome.bookmarks.removeTree(child.id, resolve));
-        }
-      } catch (e) { /* ignore */ }
-    }
+    let childByUrl = {};
+    children.forEach(function (child) {
+      if (child && child.url) childByUrl[normalizeUrlForMatch(child.url)] = child;
+    });
 
     // Only sync shortcuts that are NOT linked to real bookmarks and NOT folder shortcuts
     let keys = Object.keys(items).filter(isShortcutKey);
@@ -1189,22 +1170,43 @@ async function syncShortcutsToBookmarks() {
       return !(typeof data === 'object' && data.bookmarkId);
     });
 
-    // Put all standalone shortcuts directly in the 0tab Shortcuts folder (flat, no subfolders)
+    // Put standalone shortcuts directly in the 0tab AI folder (flat), then
+    // write the bookmarkId back under the same shortcut key.
+    let writes = {};
+    let created = 0;
     for (let key of standaloneKeys) {
       let data = items[key];
       let url = typeof data === 'object' ? (data.url || '') : (data || '');
-      if (url) {
-        await new Promise(resolve => {
+      if (!url) continue;
+      let normalized = normalizeUrlForMatch(url);
+      let bm = childByUrl[normalized];
+      if (!bm) {
+        bm = await new Promise(resolve => {
           chrome.bookmarks.create({
             parentId: folder.id,
-            title: key,
+            title: (typeof data === 'object' && data.bookmarkTitle) ? data.bookmarkTitle : key,
             url: url
           }, resolve);
         });
+        if (bm && bm.url) {
+          childByUrl[normalized] = bm;
+          created++;
+        }
+      }
+      if (bm && bm.id) {
+        let nextData = (typeof data === 'object' && data !== null) ? Object.assign({}, data) : { url: url, count: 0 };
+        nextData.url = url;
+        nextData.bookmarkId = bm.id;
+        if (!nextData.bookmarkTitle) nextData.bookmarkTitle = bm.title || key;
+        if (!nextData.tags) nextData.tags = [];
+        if (!nextData.createdAt) nextData.createdAt = Date.now();
+        writes[key] = nextData;
       }
     }
 
-    return { success: true, count: standaloneKeys.length };
+    if (Object.keys(writes).length > 0) await storageSet(writes);
+
+    return { success: true, count: created };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -1227,17 +1229,29 @@ async function importBookmarksAsShortcuts() {
 
     let imported = 0;
     let shortcuts = {};
+    let existing = await storageGet(null);
+    let usedNames = {};
+    Object.keys(existing).filter(isShortcutKey).forEach(k => { usedNames[k] = true; });
 
     function processNode(node, category) {
       if (node.url) {
-        let name = node.title.replace(/^\//, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 3);
+        let existingKey = findShortcutKeyForBookmark(existing, node.id) || findShortcutKeyForUrl(existing, node.url);
+        let name = existingKey || uniqueShortcutNameFromBase(shortcutBaseFromTitle(node.title, 'bm'), usedNames, shortcuts);
         if (name && node.url) {
-          shortcuts[name] = {
-            url: node.url, count: 0, folder: category || '',
-            bookmarkId: node.id, bookmarkTitle: node.title,
-            tags: [], createdAt: Date.now()
-          };
-          imported++;
+          let oldData = existingKey ? existing[existingKey] : {};
+          let nextData = (oldData && typeof oldData === 'object') ? Object.assign({}, oldData) : {};
+          nextData.url = node.url;
+          nextData.folder = category || nextData.folder || '';
+          nextData.bookmarkId = node.id;
+          nextData.bookmarkTitle = node.title;
+          if (!nextData.tags) nextData.tags = [];
+          if (!nextData.createdAt) nextData.createdAt = Date.now();
+          if (typeof nextData.count !== 'number') nextData.count = 0;
+          shortcuts[name] = nextData;
+          if (!existingKey) {
+            usedNames[name] = true;
+            imported++;
+          }
         }
       }
       if (node.children) {
@@ -1250,7 +1264,7 @@ async function importBookmarksAsShortcuts() {
       children[0].children.forEach(child => processNode(child, ''));
     }
 
-    if (imported > 0) {
+    if (Object.keys(shortcuts).length > 0) {
       await storageSet(shortcuts);
     }
 
@@ -1282,10 +1296,29 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
 // When bookmarks inside the 0tab folder change, update shortcuts
 // ============================================================
 
+// Read-only lookup for the 0tab bookmark folder (never creates or renames).
+// Mirrors getOrCreateBookmarkFolder's search — global, legacy names included —
+// so the two never disagree about whether the folder exists (e.g. when the
+// user has nested it or still has a pre-rebrand name).
+async function getTab0Folder() {
+  try {
+    let hits = await new Promise(r => { chrome.bookmarks.search({ title: TAB0_FOLDER_NAME }, r); });
+    let folder = (hits || []).find(b => !b.url);
+    if (folder) return folder;
+    let otherBmId = await getOtherBookmarksFolderId();
+    for (let nm of ['Tab0 AI', 'Tab0 Shortcuts', 'Tab0']) {
+      let legacyHits = await new Promise(r => { chrome.bookmarks.search({ title: nm }, r); });
+      let legacy = (legacyHits || []).find(b => !b.url && (b.parentId === otherBmId || nm === 'Tab0 Shortcuts' || nm === 'Tab0 AI'));
+      if (legacy) return legacy;
+    }
+    return null;
+  } catch (e) { return null; }
+}
+
 // Helper: check if a bookmark node is inside the 0tab folder
 async function isInsideTab0Folder(bookmarkId) {
   try {
-    let tab0Folder = await getOrCreateBookmarkFolder();
+    let tab0Folder = await getTab0Folder();
     if (!tab0Folder || !tab0Folder.id) return false;
     let node = await new Promise(resolve => {
       chrome.bookmarks.get(bookmarkId, (results) => {
@@ -1353,10 +1386,27 @@ chrome.bookmarks.onCreated.addListener((id, bookmark) => {
       });
       let folderName = (parentNode && parentNode.id !== tab0Folder.id) ? parentNode.title : '';
 
-      let name = bookmark.title.replace(/^\//, '').trim().toLowerCase().replace(/[^a-z0-9]/g, '').substring(0, 3);
+      let items = await storageGet(null);
+      let existingKey = findShortcutKeyForBookmark(items, bookmark.id) || findShortcutKeyForUrl(items, bookmark.url);
+      let name = existingKey;
+      if (!name) {
+        let usedNames = {};
+        Object.keys(items).filter(isShortcutKey).forEach(k => { usedNames[k] = true; });
+        name = uniqueShortcutNameFromBase(shortcutBaseFromTitle(bookmark.title, 'bm'), usedNames, {});
+      }
       if (!name) return;
 
-      await storageSet({ [name]: { url: bookmark.url, count: 0, folder: folderName, bookmarkId: bookmark.id, bookmarkTitle: bookmark.title, tags: [], createdAt: Date.now() } });
+      let oldData = existingKey ? items[existingKey] : {};
+      let nextData = (oldData && typeof oldData === 'object') ? Object.assign({}, oldData) : {};
+      nextData.url = bookmark.url;
+      nextData.count = typeof nextData.count === 'number' ? nextData.count : 0;
+      nextData.folder = folderName || nextData.folder || '';
+      nextData.bookmarkId = bookmark.id;
+      nextData.bookmarkTitle = bookmark.title;
+      if (!nextData.tags) nextData.tags = [];
+      if (!nextData.createdAt) nextData.createdAt = Date.now();
+
+      await storageSet({ [name]: nextData });
 
       notifyDashboard('bookmarkChanged');
     } else {
@@ -1396,10 +1446,14 @@ chrome.bookmarks.onChanged.addListener((id, changeInfo) => {
   });
 });
 
-// When a bookmark is moved (between folders)
+// When a bookmark is moved (between folders) — only act if it involves the 0tab folder
 chrome.bookmarks.onMoved.addListener((id, moveInfo) => {
   withSyncLock(async () => {
-    // Reimport to pick up the folder change
+    let tab0Folder = await getTab0Folder();
+    if (!tab0Folder) return;
+    let isInside = await isInsideTab0Folder(id);
+    let wasInParent = moveInfo.oldParentId === tab0Folder.id;
+    if (!isInside && !wasInParent) return;
     await importBookmarksAsShortcuts();
     notifyDashboard('bookmarkChanged');
   });
@@ -1437,6 +1491,15 @@ async function saveAllBookmarksAsShortcuts() {
       }
     });
 
+    let existingUrlToKey = {};
+    Object.keys(existing).filter(isShortcutKey).forEach(k => {
+      let data = existing[k];
+      if (data && typeof data === 'object' && data.type === 'folder') return;
+      let url = typeof data === 'object' ? (data.url || '') : (data || '');
+      let normalized = normalizeUrlForMatch(url);
+      if (normalized && !existingUrlToKey[normalized]) existingUrlToKey[normalized] = k;
+    });
+
     let bookmarks = [];
     function walk(node) {
       if (node.url) bookmarks.push(node);
@@ -1445,6 +1508,7 @@ async function saveAllBookmarksAsShortcuts() {
     tree.forEach(walk);
 
     let created = 0;
+    let importSkipped = 0;
     let toSave = {};
 
     for (let bm of bookmarks) {
@@ -1452,10 +1516,25 @@ async function saveAllBookmarksAsShortcuts() {
       // Skip if this bookmark already has a shortcut linked
       if (linkedBookmarkIds[bm.id]) continue;
 
+      // If the user already saved this URL under a custom shortcut name,
+      // link that key to the bookmark instead of creating a generated key.
+      let normalizedUrl = normalizeUrlForMatch(bm.url);
+      let existingUrlKey = existingUrlToKey[normalizedUrl];
+      if (existingUrlKey) {
+        let oldData = existing[existingUrlKey];
+        let nextData = (oldData && typeof oldData === 'object') ? Object.assign({}, oldData) : { url: bm.url, count: 0 };
+        nextData.url = bm.url;
+        nextData.bookmarkId = bm.id;
+        if (!nextData.bookmarkTitle) nextData.bookmarkTitle = bm.title;
+        if (!nextData.tags) nextData.tags = [];
+        if (!nextData.createdAt) nextData.createdAt = Date.now();
+        toSave[existingUrlKey] = nextData;
+        linkedBookmarkIds[bm.id] = true;
+        continue;
+      }
+
       // Generate shortcut name: lowercase, remove spaces and special chars
-      let baseName = bm.title.toLowerCase().replace(/[^a-z0-9]/g, '');
-      if (!baseName) baseName = 'bookmark';
-      baseName = baseName.substring(0, 3);
+      let baseName = shortcutBaseFromTitle(bm.title, 'bookmark');
 
       let finalName = baseName;
 
@@ -1510,42 +1589,58 @@ async function saveAllBookmarksAsShortcuts() {
           count: 0,
           bookmarkId: bm.id,
           bookmarkTitle: bm.title,
-          tags: autoTags
+          tags: autoTags,
+          createdAt: Date.now()
         };
         usedNames[finalName] = true;
+        existingUrlToKey[normalizedUrl] = finalName;
         created++;
       }
     }
 
     if (Object.keys(toSave).length > 0) {
-      // Protect against exceeding chrome.storage.sync limits
-      // Max: 512 items total, 102,400 bytes total, 8,192 bytes per item
-      let currentItems = await storageGet(null);
-      let currentCount = Object.keys(currentItems).length;
+      // Protect against excessive shortcut creation. Existing-key metadata
+      // updates are always kept because they preserve user shortcut names.
+      let currentCount = Object.keys(existing).length;
       let toSaveKeys = Object.keys(toSave);
+      let updateKeys = toSaveKeys.filter(k => k in existing);
+      let createKeys = toSaveKeys.filter(k => !(k in existing));
       let availableSlots = Math.max(0, 500 - currentCount); // Leave 12 slots as buffer
 
-      if (toSaveKeys.length > availableSlots) {
-        console.warn('0tab: Limiting bookmark import from ' + toSaveKeys.length + ' to ' + availableSlots + ' to avoid quota limits');
+      if (createKeys.length > availableSlots) {
+        // Refuse the overflow BEFORE writing so we never report items as
+        // imported that were silently dropped.
+        importSkipped = createKeys.length - availableSlots;
+        console.warn('0tab: Limiting bookmark import from ' + createKeys.length + ' to ' + availableSlots + ' to avoid quota limits (' + importSkipped + ' skipped)');
+        createKeys = createKeys.slice(0, availableSlots);
         let limited = {};
-        toSaveKeys.slice(0, availableSlots).forEach(k => { limited[k] = toSave[k]; });
+        updateKeys.forEach(k => { limited[k] = toSave[k]; });
+        createKeys.forEach(k => { limited[k] = toSave[k]; });
         toSave = limited;
-        created = availableSlots;
       }
 
-      // Save in batches to avoid per-call size limits
+      // Save in batches to avoid per-call size limits, counting only what
+      // was actually written so the returned result is accurate.
+      let createKeySet = {};
+      createKeys.forEach(k => { createKeySet[k] = true; });
+      let savedCreated = 0;
       let batchSize = 50;
       let allKeys = Object.keys(toSave);
       for (let i = 0; i < allKeys.length; i += batchSize) {
+        let batchKeys = allKeys.slice(i, i + batchSize);
         let batch = {};
-        allKeys.slice(i, i + batchSize).forEach(k => { batch[k] = toSave[k]; });
+        batchKeys.forEach(k => { batch[k] = toSave[k]; });
         try {
           await storageSet(batch);
+          batchKeys.forEach(k => { if (createKeySet[k]) savedCreated++; });
         } catch (e) {
           console.error('0tab: Batch save failed at index ' + i + ':', e.message);
+          // Everything from this batch onward was not written — count it as skipped
+          allKeys.slice(i).forEach(k => { if (createKeySet[k]) importSkipped++; });
           break; // Stop saving if we hit quota
         }
       }
+      created = savedCreated;
     }
 
     // STEP 5: Auto-generate folder-type shortcuts for Chrome bookmark folders
@@ -1563,7 +1658,8 @@ async function saveAllBookmarksAsShortcuts() {
           // Check if a folder shortcut already exists for this bookmark folder
           let alreadyExists = Object.keys(freshItems).filter(isShortcutKey).some(k => {
             let d = freshItems[k];
-            return typeof d === 'object' && d.type === 'folder' && d.bmFolderId === node.id;
+            return typeof d === 'object' && d.type === 'folder' &&
+              (String(d.folderId || '') === String(node.id) || String(d.bmFolderId || '') === String(node.id));
           });
 
           if (!alreadyExists) {
@@ -1583,6 +1679,7 @@ async function saveAllBookmarksAsShortcuts() {
             folderShortcuts[finalName] = {
               type: 'folder',
               folderTitle: node.title,
+              folderId: node.id,
               bmFolderId: node.id,
               urls: childUrls.map(c => c.url),
               urlTitles: childUrls.map(c => c.title || ''),
@@ -1602,7 +1699,7 @@ async function saveAllBookmarksAsShortcuts() {
     if (bmTree[0]) walkForFolders(bmTree[0], 0);
 
     if (Object.keys(folderShortcuts).length > 0) {
-      let currentCount = Object.keys(await storageGet(null)).length;
+      let currentCount = Object.keys(freshItems).length;
       let availSlots = Math.max(0, 500 - currentCount);
       let fKeys = Object.keys(folderShortcuts).slice(0, availSlots);
       let fBatch = {};
@@ -1614,7 +1711,13 @@ async function saveAllBookmarksAsShortcuts() {
       }
     }
 
-    return { success: true, count: created };
+    return {
+      success: true,
+      count: created, // kept for backward compatibility with existing callers
+      imported: created,
+      skipped: importSkipped,
+      reason: importSkipped > 0 ? 'quota' : null
+    };
   } catch (err) {
     console.error('0tab: saveAllBookmarksAsShortcuts error:', err.message);
     return { success: false, error: err.message };
@@ -1781,6 +1884,12 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'reconcileBookmarksShortcuts') {
     withSyncLock(function () { return reconcileBookmarksShortcuts(); })
       .then(function (res) {
+        if (res && res.queued) {
+          // Another sync holds the lock; the reconcile will run after it.
+          // Zero counts keep older callers rendering sanely.
+          sendResponse({ queued: true, shortcutsCreated: 0, bookmarksCreated: 0 });
+          return;
+        }
         sendResponse(res || { shortcutsCreated: 0, bookmarksCreated: 0 });
       })
       .catch(function (e) {
@@ -1806,21 +1915,47 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     }).catch(function () { sendResponse(null); });
     return true;
   }
+  // Batch version: get shortcut keys for multiple bookmark IDs in one call
+  if (request.action === 'getShortcutsForBookmarks') {
+    storageGet(null).then(function (items) {
+      items = items || {};
+      let result = {};
+      let bookmarkIds = request.bookmarkIds || [];
+      Object.keys(items).filter(isShortcutKey).forEach(function (key) {
+        let data = items[key];
+        if (typeof data === 'object' && bookmarkIds.includes(data.bookmarkId)) {
+          result[data.bookmarkId] = { key: key, data: data };
+        }
+      });
+      sendResponse(result);
+    }).catch(function () { sendResponse({}); });
+    return true;
+  }
   // Update shortcut key (rename) for a bookmark-linked shortcut
   if (request.action === 'updateShortcutKey') {
     let oldKey = request.oldKey;
     let newKey = request.newKey;
     let extraData = request.extraData || {};
-    storageGet(oldKey).then(function (result) {
-      let data = (result && result[oldKey]) || {};
-      Object.assign(data, extraData);
-      if (oldKey === newKey) {
-        return storageSet({ [newKey]: data }).then(function () { sendResponse({ success: true }); });
-      }
-      return storageRemove(oldKey).then(function () {
-        return storageSet({ [newKey]: data }).then(function () { sendResponse({ success: true }); });
-      });
-    }).catch(function (e) { sendResponse({ success: false, error: e && e.message }); });
+    // Run the read-modify-write under the sync lock so it can't interleave
+    // with bookmark-sync writes and lose/duplicate shortcut keys.
+    let responded = false;
+    let respond = function (payload) { responded = true; sendResponse(payload); };
+    withSyncLock(function () {
+      return storageGet(oldKey).then(function (result) {
+        let data = (result && result[oldKey]) || {};
+        Object.assign(data, extraData);
+        if (oldKey === newKey) {
+          return storageSet({ [newKey]: data }).then(function () { respond({ success: true }); });
+        }
+        return storageRemove(oldKey).then(function () {
+          return storageSet({ [newKey]: data }).then(function () { respond({ success: true }); });
+        });
+      }).catch(function (e) { respond({ success: false, error: e && e.message }); });
+    }).then(function () {
+      // withSyncLock skips fn entirely when a sync is already in progress;
+      // still answer the caller instead of leaving the message hanging.
+      if (!responded) sendResponse({ success: false, error: 'Sync in progress, try again' });
+    });
     return true;
   }
   if (request.action === 'getDailyStats') {
@@ -1878,7 +2013,7 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
   // Open folder URLs in a tab group
   if (request.action === 'openFolderInTabGroup') {
-    let urls = request.urls || [];
+    let urls = (request.urls || []).filter(isOpenableUrl);
     let groupName = request.groupName || 'Folder';
     let useTabGroup = request.useTabGroup !== false;
 
@@ -1942,10 +2077,51 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     // the user's explicit off/on choice whenever any component polled the
     // status (e.g. the chat AI pill). The toggle in Settings is the only
     // writer; we just report availability.
-    aiAvailability = null;
-    checkAiAvailability().then(function (status) {
-      sendResponse({ available: status !== 'no', status: status });
-    });
+    (async function () {
+      let settings = await getAiSettings();
+      if (settings.provider === 'openai') {
+        // ChatGPT provider: usable iff an API key is configured.
+        let hasKey = !!settings.openaiKey;
+        sendResponse({
+          available: hasKey,
+          status: hasKey ? 'readily' : 'no-key',
+          provider: 'openai',
+          model: settings.openaiModel,
+          features: settings.features
+        });
+        return;
+      }
+      aiAvailability = null;
+      let status = await checkAiAvailability();
+      // Only 'readily' means prompts will actually work — 'downloadable' /
+      // 'downloading' surface the download UI but must not enable AI calls.
+      sendResponse({ available: status === 'readily', status: status, provider: 'nano', features: settings.features });
+    })();
+    return true;
+  }
+  // Validate an OpenAI API key with a cheap models-list call (never stored here;
+  // the settings page persists it separately).
+  if (request.action === 'ai:testKey') {
+    (async function () {
+      let key = String(request.key || '').trim();
+      if (!key) { sendResponse({ ok: false, error: 'No API key provided' }); return; }
+      let controller = new AbortController();
+      let timer = setTimeout(function () { controller.abort(); }, 15000);
+      try {
+        let res = await fetch('https://api.openai.com/v1/models', {
+          headers: { 'Authorization': 'Bearer ' + key },
+          signal: controller.signal
+        });
+        if (res.ok) sendResponse({ ok: true });
+        else if (res.status === 401) sendResponse({ ok: false, error: 'Invalid API key' });
+        else if (res.status === 429) sendResponse({ ok: false, error: 'Key is valid but rate-limited or out of quota' });
+        else sendResponse({ ok: false, error: 'OpenAI returned HTTP ' + res.status });
+      } catch (e) {
+        sendResponse({ ok: false, error: 'Network error: ' + (e && e.message) });
+      } finally {
+        clearTimeout(timer);
+      }
+    })();
     return true;
   }
   if (request.action === 'ai:download') {
@@ -1970,39 +2146,49 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return true;
   }
   if (request.action === 'ai:generateTags') {
-    aiGenerateTags(request.title || '', request.url || '').then(tags => {
+    (async () => {
+      if (!(await aiFeatureEnabled('tags'))) { sendResponse({ tags: null, disabled: true }); return; }
+      let tags = await aiGenerateTags(request.title || '', request.url || '');
       sendResponse({ tags: tags });
-    });
+    })();
     return true;
   }
   if (request.action === 'ai:search') {
-    storageGet(null).then(async items => {
+    (async () => {
+      if (!(await aiFeatureEnabled('search'))) { sendResponse({ results: null, disabled: true }); return; }
+      let items = await storageGet(null);
       let shortcuts = Object.keys(items).filter(isShortcutKey).map(k => ({ key: k, data: items[k] }));
       let results = await aiSearchShortcuts(request.query || '', shortcuts);
       sendResponse({ results: results });
-    });
+    })();
     return true;
   }
   if (request.action === 'ai:description') {
-    aiGenerateDescription(request.title || '', request.url || '').then(desc => {
+    (async () => {
+      if (!(await aiFeatureEnabled('description'))) { sendResponse({ description: null, disabled: true }); return; }
+      let desc = await aiGenerateDescription(request.title || '', request.url || '');
       sendResponse({ description: desc });
-    });
+    })();
     return true;
   }
   if (request.action === 'ai:detectDuplicates') {
-    storageGet(null).then(async items => {
+    (async () => {
+      if (!(await aiFeatureEnabled('duplicates'))) { sendResponse({ duplicates: null, disabled: true }); return; }
+      let items = await storageGet(null);
       let shortcuts = Object.keys(items).filter(isShortcutKey).map(k => ({ key: k, data: items[k] }));
       let dupes = await aiDetectDuplicates(request.title || '', request.url || '', shortcuts);
       sendResponse({ duplicates: dupes });
-    });
+    })();
     return true;
   }
   if (request.action === 'ai:generateShortcutName') {
-    storageGet(null).then(async items => {
+    (async () => {
+      if (!(await aiFeatureEnabled('name'))) { sendResponse({ name: null, disabled: true }); return; }
+      let items = await storageGet(null);
       let existingKeys = Object.keys(items).filter(isShortcutKey);
       let name = await aiGenerateShortcutName(request.title || '', request.url || '', existingKeys);
       sendResponse({ name: name });
-    });
+    })();
     return true;
   }
 
@@ -2010,8 +2196,16 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'ai:chat') {
     (async () => {
       try {
-        let result = await aiPrompt(request.prompt || '');
-        sendResponse({ text: result });
+        if (!(await aiFeatureEnabled('chat'))) { sendResponse({ text: null, disabled: true }); return; }
+        let settings = await getAiSettings();
+        let result = await aiPrompt(request.prompt || '', { plain: true });
+        // Provider metadata lets the chat UI color its AI badge and show
+        // the model on hover (green = ChatGPT, blue = Gemini Nano).
+        sendResponse({
+          text: result,
+          provider: settings.provider,
+          model: settings.provider === 'openai' ? settings.openaiModel : 'gemini-nano'
+        });
       } catch (e) {
         console.warn('0tab AI chat error:', e.message);
         sendResponse({ text: null });

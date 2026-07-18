@@ -1,11 +1,23 @@
 {
+"update_url": "https://clients2.google.com/service/update2/crx",
+
   "manifest_version": 3,
   "name": "0tab AI",
-  "version": "6.0",
-  "description": "Open any bookmark in 3 keystrokes: 0 Tab name. On-device AI tags & chat, drag-to-move, folders that open as tab groups.",
-  "permissions": ["contextMenus", "storage", "tabs", "activeTab", "notifications", "bookmarks", "webNavigation", "tabGroups", "favicon", "offscreen", "history"],
+  "version": "6.4",
+  "description": "Manage Chrome bookmarks with 0 Tab shortcuts, smart tags, drag-to-move folders, and tab groups.",
+  "permissions": ["contextMenus", "storage", "tabs", "activeTab", "notifications", "bookmarks", "webNavigation", "tabGroups", "favicon", "offscreen", "history", "search"],
+  "host_permissions": ["https://api.openai.com/*"],
   "action": {
-    "default_popup": "popup.html"
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    },
+    "default_title": "0tab AI"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
   },
   "background": {
     "service_worker": "background.js"

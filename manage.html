@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>0tab AI - Manage</title>
+  <link rel="stylesheet" href="common.css">
   <link rel="stylesheet" href="manage.css">
 </head>
 <body class="theme-dark">
@@ -329,20 +330,154 @@
               </label>
             </div>
 
-            <div class="settings-item">
-              <div class="settings-info">
-                <h4>Chrome Gemini Nano</h4>
-                <p>Enable smart auto-tagging, shortcut name suggestions, and natural language search powered by Chrome's built-in Gemini Nano AI. Requires Chrome 131+ with experimental AI flags enabled. <span id="aiStatusText" style="opacity:0.6;font-size:12px;"></span></p>
-                <div id="aiDownloadArea" style="display:none;margin-top:8px;">
-                  <button id="aiDownloadBtn" class="btn btn-primary" style="font-size:12px;padding:6px 16px;">Download Model</button>
-                  <span id="aiDownloadProgress" style="margin-left:10px;font-size:12px;opacity:0.7;"></span>
+            <div class="settings-item ai-settings-item">
+              <div class="ai-settings-head">
+                <div class="settings-info">
+                  <h4>AI Features</h4>
+                  <p>Smart auto-tagging, shortcut name suggestions, natural language search and more — powered by the AI provider of your choice.</p>
                 </div>
-                <p id="aiHelpLinks" style="margin-top:8px;font-size:12px;opacity:0.7;">Learn more: <a href="https://developer.chrome.com/docs/extensions/ai" target="_blank" rel="noopener" style="color:var(--accent-primary);text-decoration:underline;">Setup guide</a> &middot; <a href="https://www.youtube.com/watch?v=CjpZCWYrSxM" target="_blank" rel="noopener" style="color:var(--accent-primary);text-decoration:underline;">Video walkthrough</a><br>Enable flags: <a href="#" class="chrome-link" data-url="chrome://flags/#optimization-guide-on-device-model" style="color:var(--accent-primary);text-decoration:underline;">chrome://flags</a> &middot; Device internals: <a href="#" class="chrome-link" data-url="chrome://on-device-internals/" style="color:var(--accent-primary);text-decoration:underline;">chrome://on-device-internals</a></p>
+                <label class="toggle-switch">
+                  <input type="checkbox" id="settingAiFeatures">
+                  <span class="toggle-slider"></span>
+                </label>
               </div>
-              <label class="toggle-switch">
-                <input type="checkbox" id="settingAiFeatures">
-                <span class="toggle-slider"></span>
-              </label>
+
+              <div id="aiConfigArea" class="ai-config-area">
+                <div class="ai-provider-group" role="radiogroup" aria-label="AI provider">
+                  <label class="ai-provider-option">
+                    <input type="radio" name="aiProvider" id="aiProviderNano" value="nano" checked>
+                    <span class="ai-provider-body">
+                      <span class="ai-provider-name">Chrome Gemini Nano</span>
+                      <span class="ai-provider-sub">On-device, free and private. Requires Chrome's built-in model.</span>
+                    </span>
+                  </label>
+                  <label class="ai-provider-option">
+                    <input type="radio" name="aiProvider" id="aiProviderOpenai" value="openai">
+                    <span class="ai-provider-body">
+                      <span class="ai-provider-name">ChatGPT (OpenAI)</span>
+                      <span class="ai-provider-sub">Uses your OpenAI API key. Bookmark titles and URLs are sent to OpenAI.</span>
+                    </span>
+                  </label>
+                </div>
+
+                <!-- Per-provider enable switches — mutually exclusive; enabling
+                     one disables the other, disabling both turns AI off. -->
+                <div class="ai-provider-enable-row">
+                  <div class="ai-provider-enable">
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="aiNanoEnableToggle">
+                      <span class="toggle-slider"></span>
+                    </label>
+                    <span class="ai-provider-enable-text" id="aiNanoEnableText">Disabled</span>
+                  </div>
+                  <div class="ai-provider-enable">
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="aiOpenaiEnableToggle">
+                      <span class="toggle-slider"></span>
+                    </label>
+                    <span class="ai-provider-enable-text" id="aiOpenaiEnableText">Disabled</span>
+                  </div>
+                </div>
+
+                <div id="aiNanoDetail" class="ai-provider-detail">
+                  <p class="ai-status-line"><span id="aiStatusText"></span></p>
+                  <div id="aiDownloadArea" style="display:none;margin-top:8px;">
+                    <button id="aiDownloadBtn" class="btn btn-primary" style="font-size:12px;padding:6px 16px;">Download Model</button>
+                    <span id="aiDownloadProgress" style="margin-left:10px;font-size:12px;opacity:0.7;"></span>
+                  </div>
+                  <p id="aiHelpLinks" style="margin-top:8px;font-size:12px;opacity:0.7;">Learn more: <a href="https://developer.chrome.com/docs/extensions/ai" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;">Setup guide</a> &middot; <a href="https://www.youtube.com/watch?v=CjpZCWYrSxM" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:underline;">Video walkthrough</a><br>Enable flags: <a href="#" class="chrome-link" data-url="chrome://flags/#optimization-guide-on-device-model" style="color:var(--accent);text-decoration:underline;">chrome://flags</a> &middot; Device internals: <a href="#" class="chrome-link" data-url="chrome://on-device-internals/" style="color:var(--accent);text-decoration:underline;">chrome://on-device-internals</a></p>
+                </div>
+
+                <div id="aiOpenaiDetail" class="ai-provider-detail" style="display:none;">
+                  <div class="ai-field-row">
+                    <label class="ai-field-label" for="openaiModelSelect">Model</label>
+                    <select id="openaiModelSelect" class="filter-select ai-model-select">
+                      <option value="gpt-4o-mini">GPT-4o mini (fast &amp; cheapest)</option>
+                      <option value="gpt-4o">GPT-4o</option>
+                      <option value="gpt-5.4-nano">GPT-5.4 nano (fast)</option>
+                      <option value="gpt-5.4-mini">GPT-5.4 mini (recommended)</option>
+                      <option value="gpt-5.4">GPT-5.4 (most capable)</option>
+                    </select>
+                  </div>
+                  <div class="ai-field-row">
+                    <label class="ai-field-label" for="openaiKeyInput">API key</label>
+                    <div class="ai-key-wrap">
+                      <input type="password" id="openaiKeyInput" class="dm-input ai-key-input" placeholder="sk-..." autocomplete="off" spellcheck="false">
+                      <button type="button" id="openaiKeyToggle" class="ai-key-toggle" aria-label="Show API key">Show</button>
+                    </div>
+                  </div>
+                  <p class="ai-key-note">Stored only on this device. Never synced.</p>
+                  <div class="ai-test-row">
+                    <button type="button" id="openaiTestBtn" class="btn btn-outline" style="font-size:12px;padding:6px 16px;">Test key</button>
+                    <span id="openaiTestResult" class="ai-test-result"></span>
+                  </div>
+                  <p class="ai-status-line" id="openaiStatusText"></p>
+                </div>
+
+                <div class="ai-features-block">
+                  <h5 class="ai-features-heading">AI features</h5>
+                  <div class="ai-feature-row">
+                    <div class="ai-feature-info">
+                      <span class="ai-feature-name">Smart tag generation</span>
+                      <span class="ai-feature-desc">Suggests up to 3 tags when you save a page, based on its title and URL.</span>
+                    </div>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="aiFeatureTags" class="ai-feature-toggle" data-feature="tags">
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </div>
+                  <div class="ai-feature-row">
+                    <div class="ai-feature-info">
+                      <span class="ai-feature-name">AI search fallback</span>
+                      <span class="ai-feature-desc">When keyword search finds nothing, matches your query by meaning (e.g. 'that design tool' &rarr; figma).</span>
+                    </div>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="aiFeatureSearch" class="ai-feature-toggle" data-feature="search">
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </div>
+                  <div class="ai-feature-row">
+                    <div class="ai-feature-info">
+                      <span class="ai-feature-name">Shortcut name suggestion</span>
+                      <span class="ai-feature-desc">Suggests a short 2&ndash;3 letter shortcut key for pages you save.</span>
+                    </div>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="aiFeatureName" class="ai-feature-toggle" data-feature="name">
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </div>
+                  <div class="ai-feature-row">
+                    <div class="ai-feature-info">
+                      <span class="ai-feature-name">AI description</span>
+                      <span class="ai-feature-desc">Writes a one-line summary of saved pages, shown as a tooltip on their tiles.</span>
+                    </div>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="aiFeatureDescription" class="ai-feature-toggle" data-feature="description">
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </div>
+                  <div class="ai-feature-row">
+                    <div class="ai-feature-info">
+                      <span class="ai-feature-name">Ask 0tab chat</span>
+                      <span class="ai-feature-desc">The dashboard chat assistant that can find, open, and manage your shortcuts.</span>
+                    </div>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="aiFeatureChat" class="ai-feature-toggle" data-feature="chat">
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </div>
+                  <div class="ai-feature-row">
+                    <div class="ai-feature-info">
+                      <span class="ai-feature-name">Duplicate detection</span>
+                      <span class="ai-feature-desc">After saving, warns you if the new page looks similar to an existing shortcut.</span>
+                    </div>
+                    <label class="toggle-switch">
+                      <input type="checkbox" id="aiFeatureDuplicates" class="ai-feature-toggle" data-feature="duplicates">
+                      <span class="toggle-slider"></span>
+                    </label>
+                  </div>
+                </div>
+              </div>
             </div>
 
           </div>
@@ -402,7 +537,7 @@
   </div>
 
   <!-- Toast -->
-  <div id="dashToast" class="toast hidden"></div>
+  <div id="dashToast" class="toast hidden" role="status" aria-live="polite"></div>
 
   <!-- History-import modal: shown on first run, or re-openable from Settings.
        Suggests frequently-visited URLs the user hasn't yet saved. -->
@@ -488,6 +623,7 @@
     </button>
   </div>
 
+  <script src="shared.js"></script>
   <script src="marked.min.js"></script>
   <script src="tab0-chat.js"></script>
   <script src="manage.js"></script>

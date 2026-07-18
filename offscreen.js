@@ -32,6 +32,21 @@ async function checkAvailability() {
   try {
     let api = getAPI();
     if (!api) return 'no';
+    // Modern API: availability() reports the model state without the side
+    // effect of create() (which can implicitly kick off a download). This
+    // is what lets the Settings page show the "Download model" button.
+    if (typeof api.availability === 'function') {
+      // Declare languages — Chrome logs a "No output language was specified"
+      // warning on LanguageModel API requests without them.
+      let status = await api.availability({
+        expectedInputs: [{ type: 'text', languages: ['en'] }],
+        expectedOutputs: [{ type: 'text', languages: ['en'] }]
+      });
+      if (status === 'downloadable' || status === 'after-download') return 'downloadable';
+      if (status === 'downloading') return 'downloading';
+      if (status !== 'available' && status !== 'readily') return 'no';
+      // Fall through to a real create() so "available" isn't a false positive.
+    }
     if (typeof api.create !== 'function') return 'no';
     // Must actually try creating a session to know if model is available.
     // Just checking if LanguageModel global exists is not enough — it exists
