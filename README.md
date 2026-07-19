@@ -50,6 +50,8 @@ This repository contains the unpacked Manifest V3 extension. Load it through `ch
 
 The repository includes a launch hero in `docs/product-hunt-hero.png`. Product Hunt gallery images should also include real screenshots or a short product demo so users can see the extension running.
 
+For a no-build recording page with the Dashboard, Popup, AI Assistant, and omnibox flow, open [`docs/video-demo.html`](docs/video-demo.html) in a browser. Its styles are in [`docs/video-demo.css`](docs/video-demo.css).
+
 ## Contributing
 
 Bug reports, usability feedback, and pull requests are welcome. Please include the Chrome version, reproduction steps, and relevant console output when reporting an issue.
