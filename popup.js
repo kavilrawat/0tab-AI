@@ -2187,7 +2187,7 @@ document.getElementById('viewToggle').addEventListener('click', function () {
 });
 
 document.getElementById('shareButton').addEventListener('click', function () {
-  chrome.tabs.create({ url: 'https://chrome.google.com/webstore/detail/slash-space-go/ejcaloplfaackbkpdiidjgakbogilcdf/' });
+  chrome.tabs.create({ url: 'https://chromewebstore.google.com/detail/0tab-ai/ejcaloplfaackbkpdiidjgakbogilcdf' });
 });
 
 document.getElementById('manageBtn').addEventListener('click', function () {
