@@ -40,9 +40,9 @@ For a guided walkthrough, read [Getting Started](docs/GETTING_STARTED.md).
 
 ## AI and privacy
 
-AI is optional. If you enable an OpenAI-powered feature, configure your own API key in the extension settings; no API key is included in this repository. Bookmark data and prompts are sent to the provider only when you invoke an AI feature. Review the provider's terms and privacy policy before enabling it.
+AI is optional. By default it runs on-device via Gemini Nano, Chrome's built-in model, so there is no API key and nothing leaves your machine. If you prefer, you can enable an OpenAI-powered option by adding your own API key in the extension settings. No API key is included in this repository. When you use the OpenAI option, your bookmark data and prompts are sent to OpenAI only while an AI feature is running. Review the provider's terms and privacy policy before enabling it.
 
-The extension requests Chrome permissions for bookmarks, tabs, tab groups, history, storage, notifications, context menus, and related navigation features. These permissions support the bookmark and tab-management workflows; inspect `manifest.json` before installing from source.
+The extension requests Chrome permissions for bookmarks, tabs, tab groups, history, storage, notifications, context menus, and related navigation features. These support the bookmark and tab-management workflows. Inspect `manifest.json` before installing from source.
 
 ## Development
 
