@@ -1,5 +1,9 @@
 # 0tab AI
 
+[![Chrome Web Store users](https://img.shields.io/chrome-web-store/users/ejcaloplfaackbkpdiidjgakbogilcdf?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/0tab-ai/ejcaloplfaackbkpdiidjgakbogilcdf) [![Chrome Web Store rating](https://img.shields.io/chrome-web-store/rating/ejcaloplfaackbkpdiidjgakbogilcdf?logo=googlechrome&logoColor=white)](https://chromewebstore.google.com/detail/0tab-ai/ejcaloplfaackbkpdiidjgakbogilcdf)
+
+**[⬇ Install from the Chrome Web Store](https://chromewebstore.google.com/detail/0tab-ai/ejcaloplfaackbkpdiidjgakbogilcdf)**
+
 Your keyboard-first bookmark command center for Chrome.
 
 0tab AI turns the omnibox into a fast way to open saved links, organize bookmarks, manage tab groups, and ask questions about your bookmark collection. Type `0`, press **Tab**, enter a shortcut, and go.
@@ -59,3 +63,7 @@ Bug reports, usability feedback, and pull requests are welcome. Please include t
 ## License
 
 MIT © Kavil Rawat
+
+---
+
+_Built with [Claude Code](https://claude.com/claude-code)._
